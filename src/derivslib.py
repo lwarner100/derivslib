@@ -370,7 +370,7 @@ class BinomialBarrierOption(BinomialOption):
         'knockout':'KO'
     }
 
-    def __init__(self, s=100, k=100, t=1, sigma=0.3, r=0.4, barrier=120, barrier_type='KI', type: str='C', style: str='A', n: int=50, qty: int = 1):
+    def __init__(self, s=100, k=100, t=1, sigma=0.3, r=0.04, barrier=120, barrier_type='KI', type: str='C', style: str='A', n: int=50, qty: int = 1):
         self.barrier = barrier
         if barrier_type.lower() not in self.valid_barriers.keys():
             raise ValueError('`barrier_type` must be KI, knockin, KO, or knockout')
