@@ -1,10 +1,15 @@
 import datetime
+import time
+import json
+import httplib2
+import threading
 
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
 import wallstreet as ws
+import yfinance as yf
 import pandas.tseries.holiday
 
 def date_to_t(date):
@@ -82,44 +87,72 @@ def get_end_of_week(date=None):
     days = get_trading_days(end_date=date + datetime.timedelta(7))
     return days[np.argmax([day.day_of_week for day in days])]
 
-def get_options(ticker, exp=None):
+def get_options(ticker,exp=None):
+    http = httplib2.Http()
+    url = f'https://query2.finance.yahoo.com/v7/finance/options/{ticker}'
+
+    data = json.loads(http.request(url)[1])
+    exps = data['optionChain']['result'][0]['expirationDates']
+    compatible_dts = [datetime.date.fromtimestamp(i) + datetime.timedelta(1) for i in exps]
+
     if isinstance(exp,int):
-        date = get_end_of_week()
-        d, m, y = date.day, date.month, date.year
-        call = ws.Call(ticker,d=d,m=m,y=y)
-        exps = call.expirations[:exp]
-        return pd.concat([get_options(ticker, datetime.datetime.strptime(day,'%d-%m-%Y')) for day in exps])
-    elif exp is not None:
-        exp = pd.to_datetime(exp)
-        d, m, y = exp.day, exp.month, exp.year
-    else:
-        date = get_end_of_week()
-        d, m, y = date.day, date.month, date.year
+        exps = exps[:exp]
+    elif isinstance(exp,str):
+        date = pd.to_datetime(exp).date()
+        exps = [exps[compatible_dts.index(date)]]
+    elif hasattr(exp,'year'):
+        date = datetime.date(exp.year,exp.month,exp.day)
+        exps = [exps[compatible_dts.index(date)]]
+    elif isinstance(exp,(list, tuple, np.ndarray)):
+        dates = [i.date() for i in pd.to_datetime(exp)]
+        exps = [exps[compatible_dts.index(date)] for date in dates]
+    # else:
+        # date = dl.utils.get_end_of_week()
+        # exps = [int(time.mktime(date.timetuple()))]
 
-    call = ws.Call(ticker,d=d,m=m,y=y)
-    put = ws.Put(ticker,d=d,m=m,y=y)
+    df = pd.DataFrame()
+    for expiration in exps:
+        date_url = f'https://query2.finance.yahoo.com/v7/finance/options/{ticker}?date={expiration}'
+        data = json.loads(http.request(date_url)[1])
+        calls = pd.DataFrame(data['optionChain']['result'][0]['options'][0]['calls'])
+        puts = pd.DataFrame(data['optionChain']['result'][0]['options'][0]['puts'])
+        df = pd.concat([df,calls,puts])
 
+    df['contractType'] = df.contractSymbol.str[-9]
 
-    calls = pd.DataFrame(call.data)
-    calls['contractType'] = 'C'
-    puts = pd.DataFrame(put.data)
-    puts['contractType'] = 'P'
-    options = calls.append(puts)
+    df = (df
+            .assign(
+                type_sign=np.where(df.contractType == 'C', 1, -1),
+                openInterest=df.openInterest.fillna(0),
+                expiration=pd.to_datetime(df.contractSymbol.str[-15:-9], format='%y%m%d')
+            )
+        )
 
-    options = (options
-                .assign(
-                    type_sign=np.where(options.contractType == 'C', 1, -1),
-                    openInterest=options.openInterest.fillna(0),
-                    expiration=options.expiration.apply(datetime.datetime.fromtimestamp),
-                    lastTradeDate=options.lastTradeDate.apply(datetime.datetime.fromtimestamp)
-                ))
-
-    return options
+    return df
 
 def put_call_ratio(ticker, exp=None):
     if isinstance(ticker, pd.DataFrame):
         options = ticker
     else:
         options = get_options(ticker,exp)
-    value_counts = options.groupby('contractType').openInterest.sum()
+    value_counts = options.groupby(['contractType','expiration']).openInterest.sum()
     return value_counts['P'] / value_counts['C']
+
+def get_sp500():
+    sp500 = pd.read_html('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies')[0]
+    return sp500
+
+class ThreadWithReturnValue(threading.Thread):
+    
+    def __init__(self, group=None, target=None, name=None,
+                 args=(), kwargs={}, Verbose=None):
+        threading.Thread.__init__(self, group, target, name, args, kwargs)
+        self._return = None
+
+    def run(self):
+        if self._target is not None:
+            self._return = self._target(*self._args,
+                                                **self._kwargs)
+    def join(self, *args):
+        threading.Thread.join(self, *args)
+        return self._return

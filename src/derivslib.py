@@ -4,6 +4,7 @@ import warnings
 
 import numpy as np
 import scipy
+import scipy.stats.qmc
 import pandas as pd
 import pandas.tseries.holiday
 
@@ -12,6 +13,7 @@ import plotly.graph_objects as go
 import seaborn as sn
 
 import wallstreet as ws
+import yfinance as yf
 
 import ipywidgets as widgets
 from IPython.display import clear_output
@@ -67,6 +69,34 @@ class Option:
         # dt += today != trading_days[0]
         return dt/252
 
+    @staticmethod
+    def parse_symbol(symbol):
+        end_sym = [char.isdigit() for idx, char in enumerate(symbol)].index(True)
+        ticker = symbol[:end_sym]
+        exp = datetime.datetime.strptime(symbol[end_sym:end_sym+6],'%y%m%d')
+        type_ = symbol[end_sym+6:end_sym+7]
+        strike = int(symbol[end_sym+7:])
+
+        option = ws.Call(ticker,d=exp.day,m=exp.month,y=exp.year,strike=strike) if type_ == 'C' else ws.Put(ticker,d=exp.day,m=exp.month,y=exp.year,strike=strike)
+        sigma = option.implied_volatility()
+        div_yield = option.q
+        px = round(option.underlying.price,2)
+        r = 0.04
+
+        kw = {
+            's':px,
+            'k':strike,
+            't':exp,
+            'sigma':sigma,
+            'r':r,
+            'type':type_,
+            'style':'A',
+            'qty':1,
+            'q':div_yield
+        }
+        return kw
+
+
     def implied_volatility(self, price):
         f = lambda x: self.value(sigma = x) - price
         return scipy.optimize.newton(f, 0.3)
@@ -83,9 +113,9 @@ class BinomialOption(Option):
     `n`: the number of periods to use in the binomial tree
     `qty`: the number of contracts (sign implies a long or short position)
     '''
-    params = ['s','k','t','sigma','r','type','style','n','qty','tree']
+    params = ['s','k','t','sigma','r','q','type','style','n','qty','tree']
 
-    def __init__(self, s=100, k=100, t=1, sigma=0.3, r=0.04, type: str='C', style: str='A', n: int=50, qty: int = 1):
+    def __init__(self, s=100, k=100, t=1, sigma=0.3, r=0.04, type: str='C', style: str='A', n: int=500, q=0., qty: int=1):
         super().__init__()
         self.s = s
         self.k = k
@@ -95,6 +125,7 @@ class BinomialOption(Option):
             self.t = t
         self.sigma = sigma
         self.r = r
+        self.q = q
         self.n = n
         self.qty = qty
         self.pos = 'long' if qty > 0 else 'short'
@@ -117,10 +148,10 @@ class BinomialOption(Option):
 
     def __repr__(self):
         sign = '+' if self.qty > 0 else ''
-        return f'{sign}{self.qty} BinomialOption(s={self.s}, k={self.k}, t={round(self.t,4)}, sigma={self.sigma}, r={self.r}, type={self.type}, style={self.style})'
+        return f'{sign}{self.qty} BinomialOption(s={self.s}, k={self.k}, t={round(self.t,4)}, sigma={self.sigma}, r={self.r}, q={self.q}, type={self.type}, style={self.style})'
 
     def __neg__(self):
-        return BinomialOption(self.s, self.k, self.t, self.sigma, self.r, type = self.type, style=self.style, n=self.n,qty=-self.qty)
+        return BinomialOption(self.s, self.k, self.t, self.sigma, self.r, type = self.type, style=self.style, n=self.n,qty=-self.qty, q=self.q)
 
     def __add__(self,other):
         return OptionPortfolio(self,other)
@@ -129,21 +160,26 @@ class BinomialOption(Option):
         return OptionPortfolio(self,-other)
 
     def __mul__(self,amount: int):
-        return BinomialOption(self.s, self.k, self.t, self.sigma, self.r, type=self.type, style=self.style, n=self.n, qty=self.qty*amount)
+        return BinomialOption(self.s, self.k, self.t, self.sigma, self.r, type=self.type, style=self.style, n=self.n, qty=self.qty*amount, q=self.q)
 
     def __rmul__(self,amount: int):
-        return BinomialOption(self.s, self.k, self.t, self.sigma, self.r, type=self.type, style=self.style, n=self.n, qty=self.qty*amount)
+        return BinomialOption(self.s, self.k, self.t, self.sigma, self.r, type=self.type, style=self.style, n=self.n, qty=self.qty*amount, q=self.q)
+
+    @classmethod
+    def from_symbol(cls, symbol, **kwargs):
+        kw = cls.parse_symbol(symbol)
+        kw.update(kwargs)
+        return cls(**kw)
 
     def reset_params(self):
-        for param in self.params:
-            self.__dict__[param] = self.default_params[param]
-            self.get_secondary_params()
+        self.__dict__.update(self.default_params)
+        self.get_secondary_params()
         delattr(self,'tree')
         delattr(self,'value_tree')
     
     def get_secondary_params(self,trees=True):
         self.dt = self.t / self.n
-        self.r_hat = (1+self.r) ** self.dt
+        self.r_hat = np.exp((self.r-self.q)*self.dt)
         self.up = np.exp(self.sigma*np.sqrt(self.dt))
         self.dn = 1/self.up
         self.pi = (self.r_hat - self.dn)/(self.up - self.dn)
@@ -157,7 +193,7 @@ class BinomialOption(Option):
                 ' ':[self.price(),self.delta(),self.gamma(),self.vega(),self.theta(),self.rho()]
                 }
         df = pd.DataFrame(data)
-        df2 = pd.DataFrame({' ':['S','K','IV','t','r',''],'':[self.s,self.k,self.sigma,self.t,self.r,'']})
+        df2 = pd.DataFrame({' ':['S','K','IV','t','r','q'],'':[self.s,self.k,self.sigma,self.t,self.r,self.q]})
 
         summary_df = pd.concat({'parameters':df2,'characteristics / greeks':df},axis=1)
         return summary_df
@@ -218,16 +254,15 @@ class BinomialOption(Option):
         
         self.value_tree = np.zeros_like(self.tree)
         self.value_tree[:,0,:] = self.evaluate(self.tree[:,-1,:])
-        # self.value_tree.sort(axis=2)
         self.value_tree[:,1,:-1] = self.layer_evaluate(self.tree[:,-2,1:] ,self.value_tree[:,0,1:], self.value_tree[:,0,:-1])
         
         for i in range(2,self.value_tree.shape[1]):
             self.value_tree[:,i,:-i] = self.layer_evaluate(self.tree[:,-i-1,i:] ,self.value_tree[:,i-1,1:-i+1], self.value_tree[:,i-1,:-i])
 
     def value(self, **kwargs):
+        self.__dict__.update(kwargs)
+
         if kwargs:
-            for key, val in kwargs.items():
-                self.__dict__[key] = val
             if hasattr(self.s,'__iter__'):
                 self.get_secondary_params(trees=False)
                 self.create_trees()
@@ -255,9 +290,9 @@ class BinomialOption(Option):
         return self.value()
 
     def delta(self,**kwargs):
+        self.__dict__.update(kwargs)
+
         if kwargs:
-            for key, val in kwargs.items():
-                self.__dict__[key] = val
             if hasattr(self.s,'__iter__'):
                 self.create_trees()
                 self.create_value_trees()
@@ -279,43 +314,49 @@ class BinomialOption(Option):
         return self.qty*result
 
     def gamma(self, **kwargs):
+        precision = 6e-1
         s = self.s
         if not kwargs.get('s') is None:
             s = kwargs['s']
         if hasattr(s,'__iter__'):
             s = np.array(s)
-            shifts = np.sort(np.concatenate((s-1e-6,s+1e-6)))
+            shifts = np.sort(np.concatenate((s-precision,s+precision)))
             kwargs['s'] = shifts
-            result = np.diff(self.delta(**kwargs).reshape(len(s),2),axis=1).flatten() / 2e-6
+            result = np.diff(self.delta(**kwargs).reshape(len(s),2),axis=1).flatten() / precision
             return result
 
-        kwargs['s'] = np.array([s-1e-6,s+1e-6])
+        kwargs['s'] = np.array([s-precision,s+precision])
 
-        result = np.diff(self.delta(**kwargs)) / 2e-6
+        result = np.diff(self.delta(**kwargs)) / (2*precision)
 
-        return self.qty*result[0]
+        return abs(self.qty)*result[0]
 
     def vega(self, **kwargs):
-        result = self.deriv(lambda x: self.value(sigma=x, **kwargs), self.sigma, dx=1e-6)
+        result = self.deriv(lambda x: self.value(sigma=x, **kwargs), self.sigma, dx=1e-2)
 
-        return self.qty*result / 100
+        return abs(self.qty)*result / 100
 
     def theta(self, **kwargs):
-        result = -self.deriv(lambda x: self.value(t=x, **kwargs), self.t, dx=1e-6)
+        result = -self.deriv(lambda x: self.value(t=x, **kwargs), self.t, dx=1e-2)
 
-        return self.qty*result / 365
+        return abs(self.qty)*result / 365
 
     def rho(self, **kwargs):
-        result = self.deriv(lambda x: self.value(r=x, **kwargs), self.r, dx=1e-6)
+        result = self.deriv(lambda x: self.value(r=x, **kwargs), self.r, dx=1e-2)
         
-        return self.qty*result / 100
+        return abs(self.qty)*result / 100
+
+    def mu(self, **kwargs):
+        result = self.deriv(lambda x: self.value(q=x, **kwargs), self.q, dx=1e-2)
+        
+        return abs(self.qty)*result / 100
 
     def plot(self,var='value',resolution=25, **kwargs):
         '''`var` must be either \'value\', \'delta\', \'gamma\', \'vega\', \'theta\', \'rho\', \'payoff\', or  \'pnl\''''
         greeks = {'value','delta','gamma','vega','rho','theta','pnl','payoff'}
+        self.__dict__.update(kwargs)
+
         if kwargs:
-            for key, val in kwargs.items():
-                self.__dict__[key] = val
             self.get_secondary_params()
 
         if var not in greeks: 
@@ -419,15 +460,16 @@ class BSOption(Option):
     `t`: the time to expiration in years or a valid date
     `sigma`: the volatility of the underlying
     `r`: the risk-free rate
+    `q`: the dividend yield
     `type`: either \'call\' or \'put\' or abbrevations \'c\' or \'p\'
     `qty`: the number of contracts (sign implies a long or short position)
 
     >>> bs_call = BSOption(s=100,k=100,t=0.25,sigma=0.3,r=0.04,type=\'call\')
     >>> bs_call.summary()
     '''
-    params = ['s','k','t','sigma','r','type']
+    params = ['s','k','t','sigma','r','q','type']
 
-    def __init__(self,s=100,k=100,t=1,sigma=0.3,r=0.04,type='C',qty=1):
+    def __init__(self,s=100, k=100, t=1, sigma=0.3, r=0.04, type='C', qty=1, q=0., **kwargs):
         super().__init__()
         self.s = s
         self.k = k
@@ -437,6 +479,7 @@ class BSOption(Option):
             self.t = t
         self.sigma = sigma
         self.r = r
+        self.q = q
         self.qty = qty
         self.pos = 'long' if qty > 0 else 'short'
         if type not in self.valid_types.keys():
@@ -468,24 +511,28 @@ class BSOption(Option):
         sign = '+' if self.qty > 0 else ''
         return f'{sign}{self.qty} BSOption(s={self.s}, k={self.k}, t={round(self.t,4)}, sigma={self.sigma}, r={self.r}, type={self.type})'
 
+    @classmethod
+    def from_symbol(cls, symbol, **kwargs):
+        kw = cls.parse_symbol(symbol)
+        kw.update(kwargs)
+        return cls(**kw)
+
     def reset_params(self):
-        for param in self.params:
-            self.__dict__[param] = self.default_params[param]
+        self.__dict__.update(self.default_params)
 
     def d1(self):
-        return (np.log(self.s/(self.k*((1+self.r)**-self.t))) + ((0.5*self.sigma**2))*self.t)/(self.sigma*(self.t**0.5))
+        return (np.log((np.exp(-self.q*self.t)*self.s)/(self.k*np.exp(-self.r*self.t))) + ((0.5*self.sigma**2))*self.t)/(self.sigma*(self.t**0.5))
 
     def d2(self):
         return self.d1() - self.sigma*np.sqrt(self.t)
     
     def value(self,**kwargs):
-        for key, val in kwargs.items():
-            self.__dict__[key] = val
+        self.__dict__.update(kwargs)
         
         if self.type == 'C':
-            result = self.s*self.norm_cdf(self.d1()) - self.k*((1+self.r)**-self.t)*self.norm_cdf(self.d2())
+            result = (np.exp(-self.q*self.t)*self.s)*self.norm_cdf(self.d1()) - self.k*np.exp(-self.r*self.t)*self.norm_cdf(self.d2())
         elif self.type == 'P':
-            result = self.k*((1+self.r)**-self.t)*self.norm_cdf(-self.d2()) - self.s*self.norm_cdf(-self.d1())
+            result = self.k*np.exp(-self.r*self.t)*self.norm_cdf(-self.d2()) - (np.exp(-self.q*self.t)*self.s)*self.norm_cdf(-self.d1())
 
         if kwargs:
             if len(result.shape) > 1:
@@ -500,8 +547,7 @@ class BSOption(Option):
 
     def delta(self,**kwargs):
         '''dValue / ds'''
-        for key, val in kwargs.items():
-            self.__dict__[key] = val
+        self.__dict__.update(kwargs)
         
         result = self.norm_cdf(self.d1())
         if self.type == 'P':
@@ -517,8 +563,7 @@ class BSOption(Option):
     
     def gamma(self,**kwargs):
         '''d^2Value / ds^2 or dDelta / ds'''
-        for key, val in kwargs.items():
-            self.__dict__[key] = val
+        self.__dict__.update(kwargs)
 
         result = np.exp(-(self.d1())**2/2)/np.sqrt(2*np.pi)/(self.s*self.sigma*np.sqrt(self.t))
 
@@ -531,8 +576,7 @@ class BSOption(Option):
 
     def speed(self,**kwargs):
         '''d^3Value / ds^3 or dGamma / ds'''
-        for key, val in kwargs.items():
-            self.__dict__[key] = val
+        self.__dict__.update(kwargs)
 
         result = -(self.gamma() / self.s) * ((self.d1() / (self.sigma * np.sqrt(self.t))) + 1)
 
@@ -545,8 +589,7 @@ class BSOption(Option):
 
     def acceleration(self,**kwargs):
         '''d^4Value / ds^4 or dSpeed / ds'''
-        for key, val in kwargs.items():
-            self.__dict__[key] = val
+        self.__dict__.update(kwargs)
 
         result = self.deriv(lambda x: self.speed(s=x), self.s, dx=1e-6, n=1)
 
@@ -555,10 +598,20 @@ class BSOption(Option):
 
         return self.qty*result
 
+    def mu(self,**kwargs):
+        '''dValue / dq'''
+        self.__dict__.update(kwargs)
+
+        result = self.deriv(lambda x: self.value(q=x), self.q, dx=1e-6, n=1)
+
+        if kwargs:
+            self.reset_params()
+
+        return self.qty*result / 100
+
     def jerk(self,**kwargs):
         '''d^5C / ds^5 or dAcceleration / ds'''
-        for key, val in kwargs.items():
-            self.__dict__[key] = val
+        self.__dict__.update(kwargs)
 
         result = self.deriv(lambda x: self.acceleration(s=x), self.s, dx=1e-6, n=1)
 
@@ -571,8 +624,7 @@ class BSOption(Option):
 
     def vega(self,**kwargs):
         '''dValue / dSigma'''
-        for key, val in kwargs.items():
-            self.__dict__[key] = val
+        self.__dict__.update(kwargs)
 
         result = self.s*np.exp(-(self.d1())**2/2)/np.sqrt(2*np.pi)*np.sqrt(self.t)/100
 
@@ -585,8 +637,7 @@ class BSOption(Option):
 
     def vanna(self,**kwargs):
         '''d^2Value / ds dSigma or dVega / ds'''
-        for key, val in kwargs.items():
-            self.__dict__[key] = val
+        self.__dict__.update(kwargs)
 
         result = (self.vega() / self.s) * (1 - (self.d1() / (self.sigma * np.sqrt(self.t))))
 
@@ -599,8 +650,7 @@ class BSOption(Option):
 
     def theta(self,**kwargs):
         '''-dValue / dt'''
-        for key, val in kwargs.items():
-            self.__dict__[key] = val
+        self.__dict__.update(kwargs)
 
         if self.type == 'C':
             result = -self.s * scipy.stats.norm.pdf(self.d1()) * self.sigma / (2 * np.sqrt(self.t)) - self.r * self.k * np.exp(-self.r * self.t) * scipy.stats.norm.cdf(self.d2())
@@ -618,8 +668,7 @@ class BSOption(Option):
 
     def rho(self,**kwargs):
         '''dValue / dr'''
-        for key, val in kwargs.items():
-            self.__dict__[key] = val
+        self.__dict__.update(kwargs)
 
         if self.type == 'C':
             result = self.k * self.t * np.exp(-self.r * self.t) * scipy.stats.norm.cdf(self.d2())
@@ -639,7 +688,7 @@ class BSOption(Option):
                 ' ':[self.price(),self.delta(),self.gamma(),self.vega(),self.theta(),self.rho()]
                 }
         df = pd.DataFrame(data)
-        df2 = pd.DataFrame({' ':['S','K','IV','t','r',''],'':[self.s,self.k,self.sigma,self.t,self.r,'']})
+        df2 = pd.DataFrame({' ':['S','K','IV','t','r','q'],'':[self.s,self.k,self.sigma,self.t,self.r,self.q]})
 
         summary_df = pd.concat({'parameters':df2,'characteristics / greeks':df},axis=1)
         return summary_df
@@ -711,8 +760,8 @@ class BSOption(Option):
             else:
                 plt.show()
         elif interactive and isinstance(var,str):
-            def f(t=2,k=100,sigma=0.1,r=0.04):
-                kwargs = {'t':t,'k':k,'t':t,'sigma':sigma,'r':r}
+            def f(t=self.t,k=self.k,sigma=self.sigma,r=self.r,q=self.q):
+                kwargs = {'t':t,'k':k,'t':t,'sigma':sigma,'r':r,'q':q}
                 if var == 'payoff':
                     plt.plot(spot,self.value(s=spot,**kwargs),label='Value')
                     plt.plot(spot,self.value(s=spot,k=k,r=r,sigma=sigma,t=1e-6),label='Payoff at Expiration')
@@ -731,7 +780,7 @@ class BSOption(Option):
                 plt.axhline(0,color='black')
                 plt.axvline(k,linestyle='--',color='gray',alpha=0.7)
 
-            interactive_plot = widgets.interactive(f, t=(0.001,2.0,0.001),sigma=(0.01,1.0,0.01), r = (0.0,0.08,0.0025), k = (self.k*0.8,self.k*1.2,0.1))
+            interactive_plot = widgets.interactive(f, t=(0.001,2.0,0.001),sigma=(0.01,1.0,0.01), r = (0.0,0.08,0.0025), k = (self.k*0.8,self.k*1.2,0.1), q = (0,0.1,0.005))
             output = interactive_plot.children[-1]
             output.layout.height = '450px'
             return interactive_plot
@@ -743,6 +792,7 @@ class MCOption(Option):
     `t`: the time to expiration in years or a valid date
     `sigma`: the volatility of the underlying
     `r`: the risk-free rate
+    `q`: the dividend yield
     `type`: either \'call\' or \'put\' or abbrevations \'c\' or \'p\'
     `qty`: the number of contracts (sign implies a long or short position)
     `N`: the number of steps in each simulation
@@ -753,12 +803,11 @@ class MCOption(Option):
     >>> call.summary()
 
     '''
-    params = ['s','k','t','sigma','r','type','qty','N','M','control']
+    params = ['s','k','t','sigma','r','q','type','qty','N','M','control']
     
-    def __init__(self,s=100,k=100,t=1,sigma=0.3,r=0.04,type='call',qty=1,N=1,M=1_000_000,control=None,**kwargs):
+    def __init__(self,s=100,k=100,t=1,sigma=0.3,r=0.04,type='call',q=0.,qty=1,N=1,M=20_000,control='antithetic',**kwargs):
         super().__init__()
-        for key, val in kwargs.items():
-            setattr(self,key,val)
+        self.__dict__.update(kwargs)
         self.s = s
         self.k = k
         if isinstance(t,str) or isinstance(t,datetime.date) or isinstance(t,datetime.datetime):
@@ -767,8 +816,9 @@ class MCOption(Option):
             self.t = t
         self.sigma = sigma
         self.r = r
+        self.q = q
         self.qty = qty
-        self.N = N
+        self.N = int(N)
         self.M = int(M)
         if isinstance(control,str):
             self.control = [control]
@@ -789,7 +839,7 @@ class MCOption(Option):
         self.norm_pdf = scipy.stats.norm.pdf
 
     def __neg__(self):
-        return MCOption(self.s, self.k, self.t, self.sigma, self.r, type=self.type, qty=-self.qty, N=self.N, M=self.M, control=self.control)
+        return MCOption(self.s, self.k, self.t, self.sigma, self.r, type=self.type, qty=-self.qty, N=self.N, M=self.M, control=self.control, q=self.q)
 
     def __add__(self,other):
         return OptionPortfolio(self,other)
@@ -798,18 +848,23 @@ class MCOption(Option):
         return OptionPortfolio(self,-other)
 
     def __mul__(self,amount: int):
-       return MCOption(self.s, self.k, self.t, self.sigma, self.r, type=self.type, qty=amount*self.qty, N=self.N, M=self.M, control=self.control)
+       return MCOption(self.s, self.k, self.t, self.sigma, self.r, type=self.type, qty=amount*self.qty, N=self.N, M=self.M, control=self.control, q=self.q)
 
     def __rmul__(self,amount: int):
-       return MCOption(self.s, self.k, self.t, self.sigma, self.r, type=self.type, qty=amount*self.qty, N=self.N, M=self.M, control=self.control)
+       return MCOption(self.s, self.k, self.t, self.sigma, self.r, type=self.type, qty=amount*self.qty, N=self.N, M=self.M, control=self.control, q=self.q)
 
     def __repr__(self):
         sign = '+' if self.qty > 0 else ''
-        return f'{sign}{self.qty} MonteCarloOption(s={self.s}, k={self.k}, t={round(self.t,4)}, sigma={self.sigma}, r={self.r}, type={self.type}, qty={self.qty}, N={self.N}, M={self.M})'
+        return f'{sign}{self.qty} MonteCarloOption(s={self.s}, k={self.k}, t={round(self.t,4)}, sigma={self.sigma}, r={self.r}, q={self.q} type={self.type}, qty={self.qty}, N={self.N}, M={self.M})'
+
+    @classmethod
+    def from_symbol(cls, symbol, **kwargs):
+        kw = cls.parse_symbol(symbol)
+        kw.update(kwargs)
+        return cls(**kw)
 
     def reset_params(self):
-        for param in self.params:
-            self.__dict__[param] = self.default_params[param]
+        self.__dict__.update(self.default_params)
 
     def bs_delta(self, s=None, t=None):
         if s is None:
@@ -830,7 +885,7 @@ class MCOption(Option):
         if 'delta' in self.control:
             self.beta1 = -1
             self.beta2 = -0.5
-            rdt = np.exp(self.r*(self.t/self.N))
+            rdt = np.exp((self.r)*(self.t/self.N))
             delta_St = self.bs_delta(s=st[:-1].T,t=np.linspace(self.t,0,self.N)).T
             cv_d = np.cumsum(delta_St*(st[1:] - st[:-1]*rdt), axis = 0)
             cv_g = [0]
@@ -859,13 +914,13 @@ class MCOption(Option):
                 return np.maximum(k - st,0)
 
     def simulate(self,**kwargs):
-        if kwargs:
-            for key, val in kwargs.items():
-                self.__dict__[key] = val
+        self.__dict__.update(kwargs)
 
         self.dt = self.t/self.N
-        nu = self.r - 0.5*self.sigma**2
-        Z = np.random.normal(size=(self.N,self.M))
+        nu = (self.r-self.q) - 0.5*self.sigma**2
+        qrandom = scipy.stats.qmc.Sobol(self.N,seed=0)
+        Z = scipy.stats.norm.ppf(qrandom.random(self.M)).T
+        # Z = np.random.normal(size=(self.N,self.M))
         log_S0 = np.log(self.s)
         log_St_delta = nu*self.dt + self.sigma*np.sqrt(self.dt)*Z
         log_St = log_S0 + np.cumsum(log_St_delta,axis=0)
@@ -907,21 +962,29 @@ class MCOption(Option):
                 ' ':[self.price(),self.delta(),self.gamma(),self.vega(),self.theta(),self.rho()]
                 }
         df = pd.DataFrame(data)
-        df2 = pd.DataFrame({' ':['S','K','IV','t','r',''],'':[self.s,self.k,self.sigma,self.t,self.r,'']})
+        df2 = pd.DataFrame({' ':['S','K','IV','t','r','q'],'':[self.s,self.k,self.sigma,self.t,self.r,self.q]})
 
         summary_df = pd.concat({'parameters':df2,'characteristics / greeks':df},axis=1)
         return summary_df
         
     def value(self, **kwargs):
         if kwargs:
-            np.random.seed(0)
-            for key, val in kwargs.items():
-                self.__dict__[key] = val
+            self.__dict__.update(kwargs)
             self.M = int(self.M)
+            self.N = int(self.N)
 
         if hasattr(self.s,'__iter__'):
-            x = kwargs.pop('s')
-            result = np.array([self.value(s=spot, **kwargs) for spot in x])
+            threads = []
+            for spot in self.s:
+                # np.random.seed(0)
+                kw = kwargs.copy()
+                kw['s'] = spot
+                inst = self.__class__(**self.default_params)
+                thread = utils.ThreadWithReturnValue(target=inst.value,kwargs=kw)
+                thread.start()
+                threads.append(thread)
+            result = np.array([t.join() for t in threads])
+            # result = np.array([self.value(s=spot, **kwargs) for spot in x])
             if kwargs:
                 self.reset_params()
             return result
@@ -933,9 +996,9 @@ class MCOption(Option):
             self.Ct = self.evaluate(self.paths,self.k)
 
         if 'delta' not in self.control:
-            self.C0 = np.exp(-self.r*self.t)*self.Ct[-1].mean()
+            self.C0 = np.exp(-(self.r-self.q)*self.t)*self.Ct[-1].mean()
         else:
-            self.C0 = np.exp(-self.r*self.t)*np.sum(self.Ct)/self.M
+            self.C0 = np.exp(-(self.r-self.q)*self.t)*np.sum(self.Ct)/self.M
 
 
         if kwargs:
@@ -947,63 +1010,64 @@ class MCOption(Option):
         return self.value(**kwargs)
 
     def delta(self, **kwargs):
-        if kwargs:
-            for key, val in kwargs.items():
-                self.__dict__[key] = val
+        kw = kwargs.copy()
+        s = kw.pop('s',self.s)
 
-        result = self.deriv(lambda x: self.value(s=x), self.s, dx=1e-6)
+        result = self.deriv(lambda x: self.value(s=x, **kw), s, dx=1e-1)
 
         if kwargs:
             self.reset_params()
 
-        return result
+        return result*np.abs(self.qty)
 
     def gamma(self, **kwargs):
-        if kwargs:
-            np.random.seed(0)
+        kw = kwargs.copy()
+        s = kw.pop('s',self.s)
+        precision = kwargs.get('precision',6e-1)
 
-            for key, val in kwargs.items():
-                self.__dict__[key] = val
+        up, down = s-precision, s+precision
+        if isinstance(up,float):
+            up, down = np.array([up]), np.array([down])
+        s = np.concatenate((up,down))
+        s.sort()
+        v = self.delta(s=s, **kw)
+        result = (v[1::2]-v[::2])/(2*precision)
+        if result.shape[0] == 1:
+            result = result[0]
 
-        result = -self.deriv(lambda x: self.delta(s=x), self.s, dx=1e-6)
+        # result = self.deriv(lambda x: self.delta(s=x, **kw), s, dx=1e-1)
 
         if kwargs:
             self.reset_params()
 
-        return result
+        return result*np.abs(self.qty)
 
     def vega(self, **kwargs):
-        if kwargs:
-            for key, val in kwargs.items():
-                self.__dict__[key] = val
+        self.__dict__.update(kwargs)
 
-        result = self.deriv(lambda x: self.value(sigma=x, **kwargs), self.sigma, dx=1e-6)
+        result = self.deriv(lambda x: self.value(sigma=x, **kwargs), self.sigma, dx=1e-2)
 
         if kwargs:
             self.reset_params()
 
-        return result / 100
+        return result*self.qty / 100
 
     def theta(self, **kwargs):
-        if kwargs:
-            for key, val in kwargs.items():
-                self.__dict__[key] = val
+        self.__dict__.update(kwargs)
 
-        result = -self.deriv(lambda x: self.value(t=x, **kwargs), self.t, dx=1e-6)
+        result = -self.deriv(lambda x: self.value(t=x, **kwargs), self.t, dx=1e-2)
 
         if kwargs:
             self.reset_params()
 
-        return result / 365
+        return result*self.qty / 365
     
     def rho(self, **kwargs):
-        if kwargs:
-            for key, val in kwargs.items():
-                self.__dict__[key] = val
+        self.__dict__.update(kwargs)
 
-        result = self.deriv(lambda x: self.value(r=x, **kwargs), self.r, dx=1e-6)
+        result = self.deriv(lambda x: self.value(r=x, **kwargs), self.r, dx=1e-2)
 
-        return result / 100
+        return result*self.qty / 100
 
 
     def plot(self, var='pnl', resolution=25, **kwargs):
@@ -1045,14 +1109,14 @@ class MCOption(Option):
         else:
             spot = np.linspace(self.k*0.66,self.k*1.33,resolution)
             if var == 'payoff':
-                vals = [self.value(s=i,t=1e-6) for i in spot]
+                vals = self.value(s=spot,t=1e-6)
             elif var == 'pnl':
                 cost = self.value()
-                vals = [self.value(s=i,t=1e-6) - cost for i in spot]
+                vals = self.value(s=spot,t=1e-6) - cost
             elif var == 'value':
-                vals = [self.value(s=i) for i in spot]
+                vals = self.value(s=spot)
             else:
-                vals = [getattr(self,var)(s=i) for i in spot]
+                vals = getattr(self,var)(s=spot)
 
             plt.plot(spot,vals)
             
@@ -1065,7 +1129,69 @@ class MCOption(Option):
                 plt.axvline(self.barrier,linestyle='--',color='gray',alpha=0.7)
             plt.axvline(self.k,linestyle='--',color='gray',alpha=0.7)
             plt.show()
-   
+
+class VanillaOption:
+    '''
+    #### Class for pricing vanilla options with the Binomial Tree, Black-Scholes, or Monte-Carlo option pricing methods
+    Arguments:
+    `method`: the method to use for pricing the option, either \'binomial\', \'bs\', or \'mc\'
+    `s`: underlying price at T=0 (now)
+    `k`: strike price of the option
+    `t`: the time to expiration in years or a valid date
+    `sigma`: the volatility of the underlying
+    `r`: the risk-free rate
+    `q`: the dividend yield
+    `type`: either \'call\' or \'put\' or abbrevations \'c\' or \'p\'
+    `style`: either \'american\' or \'european\' or abbrevations \'e\' or \'e\'
+    `qty`: the number of contracts (sign implies a long or short position)
+
+    Subclass specific parameters:
+    Binomial Tree:
+        `n`: the number of periods to use in the binomial tree
+    Monte-Carlo:
+        `N`: the number of steps to use in the Monte-Carlo simulation
+        `M`: the number of simulations to run
+        `control`: which types of control variates to apply, e.g. \'antithetic\'
+
+    >>> call = VanillaOption(
+        s = 100,
+        k = 100,
+        t = 0.25,
+        sigma = 0.3,
+        r = 0.05,
+        type = \'C\',
+        style = \'A\',
+        n = 1000
+    )
+    >>> call.summary()
+    '''
+
+    valid_methods = {
+        'binomial':'binomial',
+        'bs':'bs',
+        'black-scholes':'bs',
+        'blackscholes':'bs',
+        'mc':'mc',
+        'monte-carlo':'mc',
+        'montecarlo':'mc'
+    }
+
+    def __new__(cls, *args, **kwargs):
+        method = cls.valid_methods.get(kwargs.pop('method').replace(' ','').lower())
+
+        if method != 'binomial' and kwargs.get('style') and kwargs.get('style').lower() in ['a','american']:
+            method = 'binomial'
+            print('Defaulting to Binomial Tree pricing for American options')
+
+        if method == 'mc':
+            return MCOption(*args, **kwargs)
+        elif method == 'bs':
+            return BSOption(*args, **kwargs)
+        elif method == 'binomial':
+            return BinomialOption(*args, **kwargs)
+        else:
+            raise ValueError('Invalid method: method must be either \'binomial\', \'bs\', or \'mc\'')
+
 class MCBarrierOption(MCOption):
 
     valid_barriers = {
@@ -1075,13 +1201,15 @@ class MCBarrierOption(MCOption):
         'knockout':'KO'
     }
 
-    def __init__(self,s=100,k=100,t=1,sigma=0.3,r=0.04,type='call',qty=1, method='mc',barrier=120, barrier_type='KI', **kwargs):
+    params = ['s','k','t','sigma','r','type','barrier','barrier_type','qty','N','M','control']
+
+    def __init__(self,s=100,k=100,t=1,sigma=0.3,r=0.04,type='call',qty=1, method='mc',barrier=120, barrier_type='KI', N=1, M=20_000, **kwargs):
         self.kwargs = kwargs
         self.method = method.lower()
         self.control = kwargs.get('control',[])
-        self.M = int(kwargs.get('M')) or int(self.M)
-        self.N = int(kwargs.get('N')) or int(self.N)
-        super(MCOption,self).__init__()
+        super().__init__(s=s, k=k, sigma=sigma, t=t, r=r, N=N, M=M, type=type, qty=qty)
+        self.M = int(M)
+        self.N = int(N)
         self.s = s
         self.k = k
         if isinstance(t,str) or isinstance(t,datetime.date) or isinstance(t,datetime.datetime):
@@ -1187,17 +1315,31 @@ class MCBarrierOption(MCOption):
         else:
             return np.maximum((st - k),0)*combos[self.type][self.barrier_type]'''
 
+class AsianOption(MCOption):
+
+
+    def __init__(self, s=100,k=100,t=1,sigma=0.3,r=0.04,type='call',qty=1,N=1,M=300_000,control='antithetic',**kwargs):
+        super().__init__(s=s,k=k,t=t,sigma=sigma,r=r,type=type,qty=qty,N=N,M=M,control=control,**kwargs)
+        if 'delta' in self.control or 'gamma' in self.control:
+            raise ValueError('Asian options can only take antithetic or no control.')
+
+    def evaluate(self,st,k,cv_d=None):
+            if self.type == 'C':
+                return np.maximum(np.mean(st,axis=0) - k,0)
+            else:
+                return np.maximum(k - np.mean(st,axis=0),0)
+        
 class DeltaHedge:
     '''Represents a delta hedge of a strategy'''
     k = np.nan
 
     def __init__(self, **kwargs):
         self.s = kwargs.get('s')
-        self.qty = kwargs.get('qty') or 1
-        self._gamma = kwargs.get('gamma') or 0
-        self._speed = kwargs.get('speed') or 0
-        self._acceleration = kwargs.get('acceleration') or 0
-        self._jerk = kwargs.get('jerk') or 0
+        self.qty = kwargs.get('qty',1)
+        self._gamma = kwargs.get('gamma',0)
+        self._speed = kwargs.get('speed',0)
+        self._acceleration = kwargs.get('acceleration',0)
+        self._jerk = kwargs.get('jerk',0)
 
     def __repr__(self):
         args = f's={self.s}, qty={round(self.qty,3)}' if self.s and self. qty else ''
@@ -1244,6 +1386,70 @@ class DeltaHedge:
     def rho(self,**kwargs):
         return 0
 
+class Stock:
+    
+    def __init__(self, qty=1, s=100):
+        self.qty = qty
+        self.s = s
+        self.s0 = s
+        self.type = 'Stock'
+        self.k = 100
+        self.sigma = 0
+        self.t = 0
+        self.r = 0
+
+    def __mul__(self, other):
+        return Stock(qty=self.qty*other)
+
+    def __rmul__(self, other):
+        return Stock(qty=self.qty*other)
+
+    def __neg__(self):
+        return Stock(qty=-self.qty)
+
+    def __add__(self, other):
+        return OptionPortfolio(*[self,other])
+
+    def __sub__(self, other):
+        return OptionPortfolio(*[self,-other])
+
+    def __repr__(self):
+        sign = '+' if self.qty > 0 else ''
+        return f'{sign}{self.qty} Stock(s={self.s})'
+
+    def value(self, **kwargs):
+        s = kwargs.get('s')
+        if s is None:
+            s = self.s
+        return self.qty*(s-self.s0)
+
+    def price(self,**kwargs):
+        return self.value(**kwargs)
+
+    def delta(self, **kwargs):
+        return self.qty
+
+    def gamma(self, **kwargs):
+        return 0
+
+    def vega(self, **kwargs):
+        return 0
+
+    def theta(self, **kwargs):
+        return 0
+
+    def rho(self, **kwargs):
+        return 0
+
+    def vanna(self, **kwargs):
+        return 0
+
+    def speed(self, **kwargs):
+        return 0
+
+    def jerk(self, **kwargs):
+        return 0
+
 class OptionPortfolio:
     '''A Class for holding and analyzing a portfolio of options
     `args`: a list of Option objects
@@ -1261,15 +1467,21 @@ class OptionPortfolio:
         self.options = args
 
         if not np.unique([i.s for i in self.options]).size == 1:
-            raise ValueError('All options must have the same underlying price')
-        self.s = self.options[0].s
+            print('Warning: all options must have the same underlying price (using `s` of first options)')
+            # raise ValueError('All options must have the same underlying price')
+        self.s = max(self.options,key=lambda x: x.s)
 
         if self.delta_hedge:
             self.delta_hedge = DeltaHedge(s=self.s,qty=-self.delta(),gamma=-self.gamma(),speed=-self.speed(),acceleration=-self.acceleration())
             self.options.append(self.delta_hedge)
 
-        self.ks = [i.k for i in self.options]
-
+        self.ks = []
+        for i in self.options:
+            if not isinstance(i,Stock):
+                self.ks.append(i.k)
+            else:
+                self.options[self.options.index(i)].s = self.s
+        
 
     def __repr__(self):
         os = '\n'.join([repr(o) for o in self.options])
@@ -1527,16 +1739,16 @@ class DigitalOption(OptionPortfolio):
 
 class BSBarrierOption(OptionPortfolio):
 
-    def __init__(self, s, k, t, sigma, r, type, barrier, barrier_type='KI'):
+    def __init__(self,s=100,k=100,t=1,sigma=0.3,r=0.04,type='call', qty=1,barrier=120, barrier_type='KI'):
         spread = abs(barrier - k)
         coeff = 1 if barrier_type == 'KI' else -1
         self.components = [
-            BSOption(s, barrier, t, sigma, r, type, qty=1),
-            DigitalOption(s, barrier, t, sigma, r, type)*(spread*coeff)
+            BSOption(s, barrier, t, sigma, r, type, qty=qty),
+            DigitalOption(s, barrier, t, sigma, r, type)*(spread*coeff*qty)
             ]
         if barrier_type == 'KO':
-            self.components[0] = BSOption(s, k, t, sigma, r, type, qty=1)
-            self.components.append(BSOption(s, barrier, t, sigma, r, type, qty=-1))
+            self.components[0] = BSOption(s, k, t, sigma, r, type, qty=qty)
+            self.components.append(BSOption(s, barrier, t, sigma, r, type, qty=-qty))
         super().__init__(*self.components)
         self.ks.append(k)
 
@@ -1589,12 +1801,18 @@ class BarrierOption:
 
     def __new__(cls, *args, **kwargs):
         method = cls.valid_methods.get(kwargs.pop('method').replace(' ','').lower())
+
+        if kwargs.get('style') and kwargs.get('style').lower() in ['a','american']:
+            method = 'binomial'
+            print('Defaulting to binomial method for American style options')
         if method == 'mc':
             return MCBarrierOption(*args, **kwargs)
         elif method == 'bs':
             return BSBarrierOption(*args, **kwargs)
-        else:
+        elif method == 'binomial':
             return BinomialBarrierOption(*args, **kwargs)
+        else:
+            raise ValueError('Invalid method: method must be either \'binomial\', \'bs\', or \'mc\'')
 
 class VarianceSwap(OptionPortfolio):
 
@@ -1761,6 +1979,7 @@ class VolSurface:
             self.surface = self.get_vol_surface(moneyness=self.moneyness)
 
         fig = go.Figure(data=[go.Mesh3d(x=self.surface.strike, y=self.surface.expiry, z=self.surface.mid_iv, intensity=self.surface.mid_iv)])
+
         fig.show()
 
     @property
