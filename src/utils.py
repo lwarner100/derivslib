@@ -3,10 +3,14 @@ import time
 import json
 import httplib2
 import threading
+import os
+import pickle
+import requests
 
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import scipy
 
 import wallstreet as ws
 import yfinance as yf
@@ -86,6 +90,68 @@ def get_end_of_week(date=None):
 
     days = get_trading_days(end_date=date + datetime.timedelta(7))
     return days[np.argmax([day.day_of_week for day in days])]
+
+def get_last_trading_day(date=None):
+    if date is None:
+        start_date = datetime.date.today()
+    else:
+        start_date = pd.to_datetime(date).date()
+    end_date = start_date + datetime.timedelta(days=1)
+    start_date -= datetime.timedelta(days=7)
+    days = get_trading_days(start_date=start_date,end_date=end_date)
+    return days[-1].date()
+
+def get_yield_curve(from_treasury=False):
+    ff_url = 'https://www.federalreserve.gov/datadownload/Output.aspx?rel=PRATES&series=c27939ee810cb2e929a920a6bd77d9f6&lastobs=5&from=&to=&filetype=csv&label=include&layout=seriescolumn&type=package'
+    r = requests.get(ff_url)
+    ff = pd.read_csv(pd.io.common.BytesIO(r.content),header=5)
+    fed_funds = ff.iloc[-1,-1] / 100
+
+    if from_treasury:
+        pardir = os.path.dirname(os.path.dirname(__file__))
+        if os.path.exists(f'{pardir}/data/today_yield_curve.pkl'):
+            obj = pickle.load(open(f'{pardir}/data/today_yield_curve.pkl','rb'))
+            if obj.date.iloc[0] == get_last_trading_day():
+                return obj
+        date = datetime.date.today()
+        strf = date.strftime('%Y%m')
+        url = f'https://home.treasury.gov/resource-center/data-chart-center/interest-rates/TextView?type=daily_treasury_yield_curve&field_tdr_date_value_month={strf}'
+        df = pd.read_html(url)[0]
+        as_of_date = df.Date.iloc[-1]
+        as_of_date = datetime.datetime.strptime(as_of_date,'%m/%d/%Y').date()
+
+        cols = ['1 Mo', '2 Mo', '3 Mo', '4 Mo', '6 Mo', '1 Yr', '2 Yr', '3 Yr', '5 Yr','7 Yr', '10 Yr', '20 Yr', '30 Yr']
+        vals = df[cols].iloc[-1]
+        mats = np.array([float(i.split(' ')[0])/12 if 'Mo' in i else float(i.split(' ')[0]) for i in vals.index])
+        yields = vals.values / 100
+
+        result = pd.DataFrame({'mat':mats,'rate':yields,'date':as_of_date})
+        ff_df = pd.DataFrame({'mat':[1/365],'rate':[fed_funds],'date':[as_of_date]})
+        result = pd.concat((ff_df,result)).reset_index(drop=True)
+        
+        pickle.dump(result,open(f'{pardir}/data/today_yield_curve.pkl','wb'))
+
+        return result
+
+    url = 'https://www.federalreserve.gov/datadownload/Output.aspx?rel=H15&series=bf17364827e38702b42a58cf8eaa3f78&lastobs=5&from=&to=&filetype=csv&label=include&layout=seriescolumn'
+    r = requests.get(url)
+    df = pd.read_csv(pd.io.common.StringIO(r.text))
+    df.columns = ['description',1/12,0.25,0.5,1.,2.,3.,5.,7.,10.,20.,30.]
+    yc_df = pd.DataFrame({'mat':df.columns[1:].values.astype(float),'rate':df.iloc[-1,1:].values.astype(float) / 100,'date':df.iloc[-1,0]})
+
+    ff_df = pd.DataFrame({'mat':[1/365],'rate':[fed_funds],'date':[yc_df.date.iloc[0]]})
+    result = pd.concat((ff_df,yc_df)).reset_index(drop=True)
+
+    return result
+
+def get_risk_free_rate(t,from_treasury=False):
+    arr = False
+    if hasattr(t,'__iter__'):
+        t = np.array(t)
+        arr = True
+    curve = get_yield_curve(from_treasury=from_treasury)
+    f = scipy.interpolate.interp1d(curve.mat.values,curve.rate.values,kind='cubic')
+    return f(t) if arr else f(t).item()
 
 def get_options(ticker,exp=None):
     http = httplib2.Http()

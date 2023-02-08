@@ -1,6 +1,7 @@
 import os
 import datetime
 import warnings
+import time
 
 import numpy as np
 import scipy
@@ -81,7 +82,7 @@ class Option:
         sigma = option.implied_volatility()
         div_yield = option.q
         px = round(option.underlying.price,2)
-        r = 0.04
+        r = utils.get_risk_free_rate(utils.date_to_t(exp))
 
         kw = {
             's':px,
@@ -99,7 +100,13 @@ class Option:
 
     def implied_volatility(self, price):
         f = lambda x: self.value(sigma = x) - price
-        return scipy.optimize.newton(f, 0.3)
+        guess = 0.3
+        if isinstance(price, np.ndarray):
+            shape = price.shape
+            f = lambda x: (self.value(sigma = x.reshape(shape), synced=False) - price).flatten()
+            guess_arr = np.full_like(price, guess).flatten()
+            return scipy.optimize.newton(f, guess_arr, maxiter=100_000_000, tol=1e-10).reshape(shape)
+        return scipy.optimize.newton(f, guess, maxiter=10000)
 
 class BinomialOption(Option):
     '''Implementation of the Binomial Tree option pricing model
@@ -115,7 +122,7 @@ class BinomialOption(Option):
     '''
     params = ['s','k','t','sigma','r','q','type','style','n','qty','tree']
 
-    def __init__(self, s=100, k=100, t=1, sigma=0.3, r=0.04, type: str='C', style: str='A', n: int=500, q=0., qty: int=1):
+    def __init__(self, s=100, k=100, t=1, sigma=0.3, r=0.04, type: str='C', style: str='A', n: int=500, q=0., qty: int=1, **kwargs):
         super().__init__()
         self.s = s
         self.k = k
@@ -167,9 +174,15 @@ class BinomialOption(Option):
 
     @classmethod
     def from_symbol(cls, symbol, **kwargs):
+        '''`symbol` must be of the format {TICKER}{YY}{MM}{DD}{TYPE}{K}
+        ex. IWM230317P184'''
         kw = cls.parse_symbol(symbol)
         kw.update(kwargs)
         return cls(**kw)
+
+    def update(self, **kwargs):
+        self.default_params.update(kwargs)
+        self.reset_params()
 
     def reset_params(self):
         self.__dict__.update(self.default_params)
@@ -411,27 +424,27 @@ class BinomialBarrierOption(BinomialOption):
         'knockout':'KO'
     }
 
-    def __init__(self, s=100, k=100, t=1, sigma=0.3, r=0.04, barrier=120, barrier_type='KI', type: str='C', style: str='A', n: int=50, qty: int = 1):
+    def __init__(self, s=100, k=100, t=1, sigma=0.3, r=0.04, q=0., barrier=120, barrier_type='KI', type: str='C', style: str='A', n: int=50, qty: int = 1, **kwargs):
         self.barrier = barrier
         if barrier_type.lower() not in self.valid_barriers.keys():
             raise ValueError('`barrier_type` must be KI, knockin, KO, or knockout')
         else:
             self.barrier_type = self.valid_barriers.get(barrier_type.lower())
-        super().__init__(s=s, k=k, sigma=sigma, t=t, r=r, n=n, type=type, style=style, qty=qty)
+        super().__init__(s=s, k=k, sigma=sigma, t=t, r=r, q=q, n=n, type=type, style=style, qty=qty, **kwargs)
         
 
     def __repr__(self):
         sign = '+' if self.qty > 0 else ''
-        return f'{sign}{self.qty} BarrierOption(s={self.s}, k={self.k}, t={round(self.t,4)}, sigma={self.sigma}, r={self.r}, barrier={self.barrier}, barrier_type={self.barrier_type}, type={self.type}, style={self.style})'
+        return f'{sign}{self.qty} BarrierOption(s={self.s}, k={self.k}, t={round(self.t,4)}, sigma={self.sigma}, r={self.r}, q={self.q}, barrier={self.barrier}, barrier_type={self.barrier_type}, type={self.type}, style={self.style})'
 
     def __neg__(self):
-        return BinomialBarrierOption(self.s, self.k, self.t, self.sigma, self.r, type=self.type, style=self.style, n=self.n,qty=-self.qty, barrier=self.barrier, barrier_type=self.barrier_type)
+        return BinomialBarrierOption(self.s, self.k, self.t, self.sigma, self.r, q=self.q, type=self.type, style=self.style, n=self.n,qty=-self.qty, barrier=self.barrier, barrier_type=self.barrier_type)
 
     def __mul__(self,amount: int):
-        return BinomialBarrierOption(self.s, self.k, self.t, self.sigma, self.r, type=self.type, style=self.style, n=self.n, qty=self.qty*amount, barrier=self.barrier, barrier_type=self.barrier_type)
+        return BinomialBarrierOption(self.s, self.k, self.t, self.sigma, self.r, q=self.q, type=self.type, style=self.style, n=self.n, qty=self.qty*amount, barrier=self.barrier, barrier_type=self.barrier_type)
 
     def __rmul__(self,amount: int):
-        return BinomialBarrierOption(self.s, self.k, self.t, self.sigma, self.r, type=self.type, style=self.style, n=self.n, qty=self.qty*amount, barrier=self.barrier, barrier_type=self.barrier_type)
+        return BinomialBarrierOption(self.s, self.k, self.t, self.sigma, self.r, q=self.q, type=self.type, style=self.style, n=self.n, qty=self.qty*amount, barrier=self.barrier, barrier_type=self.barrier_type)
 
     def evaluate(self,price):
         conditions = {
@@ -469,16 +482,16 @@ class BSOption(Option):
     '''
     params = ['s','k','t','sigma','r','q','type']
 
-    def __init__(self,s=100, k=100, t=1, sigma=0.3, r=0.04, type='C', qty=1, q=0., **kwargs):
+    def __init__(self,s=100, k=100, t=1, sigma=0.3, r=None, type='C', qty=1, q=0., **kwargs):
         super().__init__()
         self.s = s
         self.k = k
-        if isinstance(t,str) or isinstance(t,datetime.date) or isinstance(t,datetime.datetime):
+        if isinstance(t,(str,datetime.date,datetime.datetime)):
             self.t = self.date_to_t(t)
         else:
             self.t = t
         self.sigma = sigma
-        self.r = r
+        self.r = r or utils.get_risk_free_rate(self.t)
         self.q = q
         self.qty = qty
         self.pos = 'long' if qty > 0 else 'short'
@@ -513,9 +526,15 @@ class BSOption(Option):
 
     @classmethod
     def from_symbol(cls, symbol, **kwargs):
+        '''`symbol` must be of the format {TICKER}{YY}{MM}{DD}{TYPE}{K}
+        ex. IWM230317P184'''
         kw = cls.parse_symbol(symbol)
         kw.update(kwargs)
         return cls(**kw)
+
+    def update(self, **kwargs):
+        self.default_params.update(kwargs)
+        self.reset_params()
 
     def reset_params(self):
         self.__dict__.update(self.default_params)
@@ -535,7 +554,7 @@ class BSOption(Option):
             result = self.k*np.exp(-self.r*self.t)*self.norm_cdf(-self.d2()) - (np.exp(-self.q*self.t)*self.s)*self.norm_cdf(-self.d1())
 
         if kwargs:
-            if len(result.shape) > 1:
+            if len(result.shape) > 1 and kwargs.get('synced',True):
                 result = np.diag(result)
             self.reset_params()
 
@@ -859,9 +878,15 @@ class MCOption(Option):
 
     @classmethod
     def from_symbol(cls, symbol, **kwargs):
+        '''`symbol` must be of the format {TICKER}{YY}{MM}{DD}{TYPE}{K}
+        ex. IWM230317P184'''
         kw = cls.parse_symbol(symbol)
         kw.update(kwargs)
         return cls(**kw)
+
+    def update(self, **kwargs):
+        self.default_params.update(kwargs)
+        self.reset_params()
 
     def reset_params(self):
         self.__dict__.update(self.default_params)
@@ -976,7 +1001,6 @@ class MCOption(Option):
         if hasattr(self.s,'__iter__'):
             threads = []
             for spot in self.s:
-                # np.random.seed(0)
                 kw = kwargs.copy()
                 kw['s'] = spot
                 inst = self.__class__(**self.default_params)
@@ -984,7 +1008,6 @@ class MCOption(Option):
                 thread.start()
                 threads.append(thread)
             result = np.array([t.join() for t in threads])
-            # result = np.array([self.value(s=spot, **kwargs) for spot in x])
             if kwargs:
                 self.reset_params()
             return result
@@ -1066,6 +1089,13 @@ class MCOption(Option):
         self.__dict__.update(kwargs)
 
         result = self.deriv(lambda x: self.value(r=x, **kwargs), self.r, dx=1e-2)
+
+        return result*self.qty / 100
+
+    def mu(self, **kwargs):
+        self.__dict__.update(kwargs)
+
+        result = self.deriv(lambda x: self.value(q=x, **kwargs), self.q, dx=1e-2)
 
         return result*self.qty / 100
 
@@ -1814,6 +1844,208 @@ class BarrierOption:
         else:
             raise ValueError('Invalid method: method must be either \'binomial\', \'bs\', or \'mc\'')
 
+class HestonModel:
+    '''An Implementation of the Heston Stochastic Volatility Model for fitting parameters to real data
+    `ticker`: the ticker of the underlying stock
+    `option_type`: the type of option to price, either \'C\' or \'P\'
+    `pull_data`: whether to pull data from APIs or not'''
+
+    def __init__(self,ticker,option_type='P',pull_data=True):
+        self.ticker = ticker
+        self.option_type = option_type
+        if pull_data:
+            self.get_market_data()
+
+    def get_market_data(self):
+        self.quote = ws.Stock(self.ticker)
+        self.historical = self.quote.historical(30)
+        self.s = self.quote.price
+        self.option_chain = utils.get_options(self.ticker,15)
+        # self.option_chain = self.option_chain[((self.option_chain.contractType == 'C')&(self.option_chain.strike > self.s)|(self.option_chain.contractType == 'P')&(self.option_chain.strike <= self.s))]
+        # self.option_chain = self.option_chain[(self.option_chain.strike < 1.33*self.s)&(self.option_chain.strike > 0.66*self.s)]
+        val_surf_dict = {}
+        for option_type in ['C','P']:
+            option_chain = self.option_chain[self.option_chain.contractType==option_type]
+            value_surface = option_chain.pivot_table(index='strike',columns='expiration',values='lastPrice').dropna(axis=0)
+            value_surface.columns = value_surface.columns.to_series().apply(utils.date_to_t)
+            val_surf_dict[option_type] = value_surface
+        self.value_surface = val_surf_dict[self.option_type]
+
+    def value(self,k,t):
+        if not hasattr(self,'params'):
+            self.fit()
+        v0, rho, kappa, theta, sigma, lambd = self.params.values()
+        return self.value_params(self.s,k,t,v0,kappa,theta,sigma,rho,lambd)
+
+    def value_params(self, s, k, t, v0, kappa, theta, sigma, rho, lambd, r=None):
+        if r is None:
+            r = utils.get_risk_free_rate(t)
+        
+        def char_func(phi):
+            nonlocal s, k, t, v0, kappa, theta, sigma, rho, lambd, r
+            a = kappa*theta
+            b = kappa+lambd
+            rspi = rho*sigma*phi*1j
+            d = np.sqrt( (rho*sigma*phi*1j - b)**2 + (phi*1j+phi**2)*sigma**2 )
+            g = (b-rspi+d)/(b-rspi-d)
+
+            t1 = np.exp(r*phi*1j*t)
+            t2 = s**(phi*1j) * ( (1-g*np.exp(d*t))/(1-g) )**(-2*a/sigma**2)
+            t3 = np.exp(a*t*(b-rspi+d)/sigma**2 + v0*(b-rspi+d)*( (1-np.exp(d*t))/(1-g*np.exp(d*t)) )/sigma**2)
+            return t1*t2*t3
+
+        def integrand(phi):
+            nonlocal s, k, t, v0, kappa, theta, sigma, rho, lambd, r
+            return (np.exp(r*t)*char_func(phi-1j) - k*char_func(phi)) / (1j*phi*k**(1j*phi))
+
+        integral = scipy.integrate.quad_vec(integrand, 1e-9, 1e3)[0]
+        
+        call = (s - k*np.exp(-r*t))/2 + np.real(integral)/np.pi
+        put = call - s + k*np.exp(-r*t)
+
+        return call if self.option_type == 'C' else put
+
+    def simulate(self,v0,rho,kappa,theta,sigma,T,N=100,M=2_000):
+        qrandom = scipy.stats.qmc.Sobol(N,seed=0)
+        Z1 = scipy.stats.norm.ppf(qrandom.random(M)).T
+        Z2 = scipy.stats.norm.ppf(qrandom.random(M)).T
+        Zv = Z1
+        Zs = rho*Z1 + np.sqrt(1-rho**2)*Z2
+        s = np.zeros((N+1,M))
+        v = np.zeros((N+1,M))
+        v[0] = v0
+        s[0] = self.s
+        dt = T/N
+        r = utils.get_risk_free_rate(T)
+
+        for i in range(N):
+            v[i+1,:] = v[i,:] + kappa*(theta - v[i,:])*dt + (sigma * v[i,:]**0.5 * Zv[i,:] * dt**0.5)
+            s[i+1,:] = s[i,:]*np.exp((r-0.5*v[i,:])*dt + v[i,:]**0.5 * Zs[i,:] * dt**0.5)
+
+        return s, v
+
+    def value_simulation(self,k,t,st=None):
+        if st is None and hasattr(self,'params'):
+            st = self.simulate(*self.params,T=t)[0]
+        elif st is None and not hasattr(self,'params'):
+            raise ValueError('Must pass either `st` or run `fit()` to get `params`')
+        r = utils.get_risk_free_rate(t)
+        if isinstance(k,(int,float)):
+            cT = np.maximum(st[-1,:]-k,0) if self.option_type=='C' else np.maximum(k-st[-1,:],0)
+            return np.exp(-r*t) * np.nanmean(cT)
+
+        k_arr = np.full((st[-1,:].shape[0],len(k)),k)
+        st_transform = np.full_like(k_arr.T,st[-1,:],dtype=np.float64).T
+        if self.option_type == 'C':
+            cts = np.maximum(st_transform-k_arr,0)
+            c0s = np.exp(-r*t) * np.nanmean(cts,axis=0)
+            return c0s
+        elif self.option_type == 'P':
+            pts = np.maximum(k_arr-st_transform,0)
+            p0s = np.exp(-r*t) * np.nanmean(pts,axis=0)
+            return p0s
+
+    def estimate_value_surface(self,params):
+        v0, rho, kappa, theta, sigma, lambd = params
+        
+        ts = self.value_surface.columns.values
+        ks = self.value_surface.index.values
+        t, k = np.meshgrid(ts,ks)
+        surface = self.value_params(s=self.s,k=k,t=t,v0=v0,kappa=kappa,theta=theta,sigma=sigma,rho=rho,lambd=lambd)
+
+        return surface
+
+    def get_loss(self,params):
+        err = (self.estimate_value_surface(params) - self.value_surface.values)**2
+        # np.nan_to_num(err,nan=100)
+        return np.sum(err)
+
+    def fit(self,cons=False):
+        # v0, rho, kappa, theta, sigma, lambda = args
+        params = ['v0', 'rho', 'kappa', 'theta', 'sigma', 'lambda']
+        bounds = (
+            (0.0,0.5),
+            (-0.9,-0.002),
+            (0.0,5),
+            (0.0,0.3),
+            (0.0,1.5),
+            (0.0,1.0),
+        )
+        cons = [
+            {'type': 'ineq', 'fun': lambda args:  np.abs(2*args[2]*args[3] - args[4]**2)-0.1},
+            ]
+        kw = dict(bounds=bounds, tol = 1e-1, method='SLSQP',options={'maxiter':1000})
+        if cons:
+            kw['constraints'] = cons
+        start = time.time()
+        res = scipy.optimize.minimize(
+            self.get_loss,
+            [0.1,-0.5,1.5,0.1,0.3,0.5],
+            **kw
+            )
+        dt = time.time() - start
+        self.params_arr = res.x
+        self.params = dict(zip(params,res.x))
+        print(f'Model Optimized in {round(dt,2)} seconds | SSR: {round(res.fun,3)}\n'+'Parameters:\n' + '\n'.join([f'{k}: {round(v,3)}' for k,v in self.params.items()]))
+
+    def plot_surfaces(self):
+        if not hasattr(self,'params_arr'):
+            self.fit()
+        est_surface = self.estimate_value_surface(self.params_arr)
+        fig = go.Figure(data=[go.Surface(x=self.value_surface.columns,y=self.value_surface.index,z=est_surface,colorscale='Viridis'),
+                            go.Surface(x=self.value_surface.columns,y=self.value_surface.index,z=self.value_surface.values)])
+        fig.show()
+
+class HestonOption(Option):
+    '''A class for valuing and analyzing options using parameters given from a fitted Heston model
+    `ticker`: the ticker of the underlying asset
+    `k`: the strike price of the option
+    `t`: the time to maturity of the option
+    `type`: the type of the option, either call or put
+    `qty`: the quantity of the option
+    `method`: the method used to value the option, either `bs`, `binomial`, or `mc`
+    `fit`: whether or not to fit the Heston model to the option's Black surface
+    `params`: manual entry of Heston model parameters'''
+
+    def __init__(self, ticker, k=None, t=None, type='C', qty=1, method='bs', fit=False, params=None, **kwargs):
+        super().__init__()
+        self.ticker = ticker
+        if type not in self.valid_types.keys():
+            raise ValueError('`type` must be call, C, put, or P')
+        else:
+            self.type = self.valid_types.get(type)
+        self.model = HestonModel(ticker,pull_data=True,option_type=self.type)
+        self.s = self.model.s
+        self.k = k or self.s
+        self.qty = qty
+        self.q = self.model.quote.dy
+        if isinstance(t,(str,datetime.date,datetime.datetime)):
+            self.t = self.date_to_t(t)
+        else:
+            self.t = t or 0.25
+        self.method = method
+        if fit:
+            self.fit()
+        if params:
+            self.model.params = params
+
+    def __repr__(self):
+        sign = '+' if self.qty > 0 else ''
+        return f'{sign}{self.qty} BSOption(s={self.s}, k={self.k}, t={round(self.t,4)}, sigma={self.sigma}, r={self.r}, type={self.type})'
+
+
+    def value(self,k,t):
+        return self.model.value(k=k,t=t)
+
+    def fit(self):
+        self.model.fit()
+        self.engine = VanillaOption(s=self.s,k=self.k,t=self.t,sigma=0.3,type=self.type,method=self.method,q=self.q,qty=self.qty)
+        self.iv = self.engine.implied_volatility(self.value(self.k,self.t))
+        self.engine.sigma = self.iv
+        attrs = ['delta','gamma','theta','vega','rho','mu','plot','summary']
+        for attr in attrs:
+            setattr(self,attr,getattr(self.engine,attr))
+
 class VarianceSwap(OptionPortfolio):
 
     def __init__(self,realized_vol,k_vol,t,r,s=100,notional=1e3,n=100):
@@ -1978,7 +2210,8 @@ class VolSurface:
         if not hasattr(self,'surface'):
             self.surface = self.get_vol_surface(moneyness=self.moneyness)
 
-        fig = go.Figure(data=[go.Mesh3d(x=self.surface.strike, y=self.surface.expiry, z=self.surface.mid_iv, intensity=self.surface.mid_iv)])
+        # fig = go.Figure(data=[go.Mesh3d(x=self.surface.strike, y=self.surface.expiry, z=self.surface.mid_iv, intensity=self.surface.mid_iv)])
+        fig = go.Figure(data=[go.Surface(x=self.surface_table.index, y=self.surface_table.columns, z=self.surface_table.values)])
 
         fig.show()
 
@@ -1986,7 +2219,7 @@ class VolSurface:
     def surface_table(self):
         if not hasattr(self,'surface'):
             self.surface = self.get_vol_surface(moneyness=self.moneyness)
-        return self.surface.pivot_table('mid_iv','strike','expiry').dropna()
+        return self.surface.pivot_table('mid_iv','strike','expiry').dropna(axis=0)
 
 class GEX:
 
