@@ -51,6 +51,8 @@ class Option:
         'european':'E',
     }
 
+    default_params = {}
+
     def __init__(self,*args, **kwargs):
         pass
 
@@ -97,6 +99,16 @@ class Option:
         }
         return kw
 
+    def update(self, inplace=True,**kwargs):
+        if not inplace:
+            params = self.default_params.copy()
+            params.update(kwargs)
+            return self.__class__(**params)
+        self.default_params.update(kwargs)
+        self.reset_params()
+
+    def reset_params(self):
+        self.__dict__.update(self.default_params)
 
     def implied_volatility(self, price):
         f = lambda x: self.value(sigma = x) - price
@@ -126,12 +138,12 @@ class BinomialOption(Option):
         super().__init__()
         self.s = s
         self.k = k
-        if isinstance(t,str) or isinstance(t,datetime.date) or isinstance(t,datetime.datetime):
+        if isinstance(t,(str,datetime.date,datetime.datetime)):
             self.t = self.date_to_t(t)
         else:
             self.t = t
         self.sigma = sigma
-        self.r = r
+        self.r = r or utils.get_risk_free_rate(self.t)
         self.q = q
         self.n = n
         self.qty = qty
@@ -179,10 +191,6 @@ class BinomialOption(Option):
         kw = cls.parse_symbol(symbol)
         kw.update(kwargs)
         return cls(**kw)
-
-    def update(self, **kwargs):
-        self.default_params.update(kwargs)
-        self.reset_params()
 
     def reset_params(self):
         self.__dict__.update(self.default_params)
@@ -532,10 +540,6 @@ class BSOption(Option):
         kw.update(kwargs)
         return cls(**kw)
 
-    def update(self, **kwargs):
-        self.default_params.update(kwargs)
-        self.reset_params()
-
     def reset_params(self):
         self.__dict__.update(self.default_params)
 
@@ -829,12 +833,12 @@ class MCOption(Option):
         self.__dict__.update(kwargs)
         self.s = s
         self.k = k
-        if isinstance(t,str) or isinstance(t,datetime.date) or isinstance(t,datetime.datetime):
+        if isinstance(t,(str,datetime.date,datetime.datetime)):
             self.t = self.date_to_t(t)
         else:
             self.t = t
         self.sigma = sigma
-        self.r = r
+        self.r = r or utils.get_risk_free_rate(self.t)
         self.q = q
         self.qty = qty
         self.N = int(N)
@@ -883,10 +887,6 @@ class MCOption(Option):
         kw = cls.parse_symbol(symbol)
         kw.update(kwargs)
         return cls(**kw)
-
-    def update(self, **kwargs):
-        self.default_params.update(kwargs)
-        self.reset_params()
 
     def reset_params(self):
         self.__dict__.update(self.default_params)
@@ -1242,12 +1242,12 @@ class MCBarrierOption(MCOption):
         self.N = int(N)
         self.s = s
         self.k = k
-        if isinstance(t,str) or isinstance(t,datetime.date) or isinstance(t,datetime.datetime):
+        if isinstance(t,(str,datetime.date,datetime.datetime)):
             self.t = self.date_to_t(t)
         else:
             self.t = t
         self.sigma = sigma
-        self.r = r
+        self.r = r or utils.get_risk_free_rate(self.t)
         self.qty = qty
         self.pos = 'long' if qty > 0 else 'short'
         if type not in self.valid_types.keys():
@@ -1738,12 +1738,12 @@ class DigitalOption(OptionPortfolio):
 
         self.s = s
         self.k = k
-        if isinstance(t,str) or isinstance(t,datetime.date) or isinstance(t,datetime.datetime):
+        if isinstance(t,(str,datetime.date,datetime.datetime)):
             self.t = Option.date_to_t(t)
         else:
             self.t = t
         self.sigma = sigma
-        self.r = r
+        self.r = r or utils.get_risk_free_rate(self.t)
         self.type = type
         self.qty = qty
         self.precision = precision
@@ -1905,7 +1905,7 @@ class HestonModel:
 
         return call if self.option_type == 'C' else put
 
-    def simulate(self,v0,rho,kappa,theta,sigma,T,N=100,M=2_000):
+    def simulate(s,v0,rho,kappa,theta,sigma,T,N=100,M=2_000):
         qrandom = scipy.stats.qmc.Sobol(N,seed=0)
         Z1 = scipy.stats.norm.ppf(qrandom.random(M)).T
         Z2 = scipy.stats.norm.ppf(qrandom.random(M)).T
@@ -1914,7 +1914,7 @@ class HestonModel:
         s = np.zeros((N+1,M))
         v = np.zeros((N+1,M))
         v[0] = v0
-        s[0] = self.s
+        s[0] = s
         dt = T/N
         r = utils.get_risk_free_rate(T)
 
@@ -1957,7 +1957,6 @@ class HestonModel:
 
     def get_loss(self,params):
         err = (self.estimate_value_surface(params) - self.value_surface.values)**2
-        # np.nan_to_num(err,nan=100)
         return np.sum(err)
 
     def fit(self,cons=False):
@@ -2031,8 +2030,7 @@ class HestonOption(Option):
 
     def __repr__(self):
         sign = '+' if self.qty > 0 else ''
-        return f'{sign}{self.qty} BSOption(s={self.s}, k={self.k}, t={round(self.t,4)}, sigma={self.sigma}, r={self.r}, type={self.type})'
-
+        return f'{sign}{self.qty} HestonOption(ticker={self.ticker}, type={self.type})'
 
     def value(self,k,t):
         return self.model.value(k=k,t=t)
@@ -2051,7 +2049,7 @@ class VarianceSwap(OptionPortfolio):
     def __init__(self,realized_vol,k_vol,t,r,s=100,notional=1e3,n=100):
         self.n = n
         self.s = s
-        self.r = r
+        self.r = r or utils.get_risk_free_rate(self.t)
         self.t = t
         self.k_vol = k_vol
         self.sigma = realized_vol
@@ -2211,7 +2209,7 @@ class VolSurface:
             self.surface = self.get_vol_surface(moneyness=self.moneyness)
 
         # fig = go.Figure(data=[go.Mesh3d(x=self.surface.strike, y=self.surface.expiry, z=self.surface.mid_iv, intensity=self.surface.mid_iv)])
-        fig = go.Figure(data=[go.Surface(x=self.surface_table.index, y=self.surface_table.columns, z=self.surface_table.values)])
+        fig = go.Figure(data=[go.Surface(x=self.surface_table.columns, y=self.surface_table.index, z=self.surface_table.values)])
 
         fig.show()
 

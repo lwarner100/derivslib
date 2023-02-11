@@ -6,6 +6,7 @@ import threading
 import os
 import pickle
 import requests
+import concurrent.futures as cf
 
 import numpy as np
 import pandas as pd
@@ -172,18 +173,26 @@ def get_options(ticker,exp=None):
     elif isinstance(exp,(list, tuple, np.ndarray)):
         dates = [i.date() for i in pd.to_datetime(exp)]
         exps = [exps[compatible_dts.index(date)] for date in dates]
-    # else:
-        # date = dl.utils.get_end_of_week()
-        # exps = [int(time.mktime(date.timetuple()))]
+    else:
+        pass # Use all expirations
 
     df = pd.DataFrame()
-    for expiration in exps:
-        date_url = f'https://query2.finance.yahoo.com/v7/finance/options/{ticker}?date={expiration}'
-        data = json.loads(http.request(date_url)[1])
+
+    def request_api(expiration):
+        nonlocal ticker
+        temp_http = httplib2.Http()
+        date_url = f'http://query2.finance.yahoo.com/v7/finance/options/{ticker}?date={expiration}'
+        data = json.loads(temp_http.request(date_url)[1])
         calls = pd.DataFrame(data['optionChain']['result'][0]['options'][0]['calls'])
         puts = pd.DataFrame(data['optionChain']['result'][0]['options'][0]['puts'])
-        df = pd.concat([df,calls,puts])
+        return pd.concat([calls,puts])
 
+    # for exp in exps:
+    #     df = pd.concat([df]+request_api(exp))
+    executor = cf.ThreadPoolExecutor()
+    futures = [executor.submit(request_api,exp) for exp in exps]
+    df = pd.concat([f.result() for f in futures])
+    
     df['contractType'] = df.contractSymbol.str[-9]
 
     df = (df
@@ -210,15 +219,14 @@ def get_sp500():
 
 class ThreadWithReturnValue(threading.Thread):
     
-    def __init__(self, group=None, target=None, name=None,
-                 args=(), kwargs={}, Verbose=None):
+    def __init__(self, group=None, target=None, name=None,args=(), kwargs={}):
         threading.Thread.__init__(self, group, target, name, args, kwargs)
         self._return = None
 
     def run(self):
         if self._target is not None:
-            self._return = self._target(*self._args,
-                                                **self._kwargs)
+            self._return = self._target(*self._args,**self._kwargs)
+
     def join(self, *args):
         threading.Thread.join(self, *args)
         return self._return
