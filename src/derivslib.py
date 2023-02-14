@@ -14,10 +14,8 @@ import plotly.graph_objects as go
 import seaborn as sn
 
 import wallstreet as ws
-import yfinance as yf
 
 import ipywidgets as widgets
-from IPython.display import clear_output
 
 from .cboe import CBOE
 from . import utils
@@ -1358,63 +1356,6 @@ class AsianOption(MCOption):
                 return np.maximum(np.mean(st,axis=0) - k,0)
             else:
                 return np.maximum(k - np.mean(st,axis=0),0)
-        
-class DeltaHedge:
-    '''Represents a delta hedge of a strategy'''
-    k = np.nan
-
-    def __init__(self, **kwargs):
-        self.s = kwargs.get('s')
-        self.qty = kwargs.get('qty',1)
-        self._gamma = kwargs.get('gamma',0)
-        self._speed = kwargs.get('speed',0)
-        self._acceleration = kwargs.get('acceleration',0)
-        self._jerk = kwargs.get('jerk',0)
-
-    def __repr__(self):
-        args = f's={self.s}, qty={round(self.qty,3)}' if self.s and self. qty else ''
-        return f'DeltaHedge({args})'
-
-    def __neg__(self):
-        return DeltaHedge(s=self.s, qty=-self.qty)
-
-    def value(self,**kwargs):
-        # result = (self.qty * kwargs.get('s') - (self.s*self.qty) if kwargs.get('s') else self.qty * self.s) - (self.s*self.qty)
-        if kwargs.get('s'):
-            result = (
-                ( self.delta() * (kwargs.get('s') - self.s))
-                + ( self.gamma() * (kwargs.get('s') - self.s)**2)
-                +  ( self.speed() * (kwargs.get('s') - self.s)**3)
-                +  ( self._acceleration * (kwargs.get('s') - self.s)**4)
-                +  ( self._jerk * (kwargs.get('s') - self.s)**5)
-                )
-        else:
-            result = 0
-        return result
-
-    def cost(self):
-        return self.qty * self.s
-
-    def price(self,**kwargs):
-        return self.value(**kwargs)
-
-    def delta(self,**kwargs):
-        return self.qty
-
-    def gamma(self,**kwargs):
-        return self._gamma
-
-    def speed(self,**kwargs):
-        return self._speed 
-
-    def vega(self,**kwargs):
-        return 0
-
-    def theta(self,**kwargs):
-        return 0
-
-    def rho(self,**kwargs):
-        return 0
 
 class Stock:
     
@@ -1423,7 +1364,7 @@ class Stock:
         self.s = s
         self.s0 = s
         self.type = 'Stock'
-        self.k = 100
+        self.k = 0
         self.sigma = 0
         self.t = 0
         self.r = 0
@@ -1448,9 +1389,7 @@ class Stock:
         return f'{sign}{self.qty} Stock(s={self.s})'
 
     def value(self, **kwargs):
-        s = kwargs.get('s')
-        if s is None:
-            s = self.s
+        s = kwargs.get('s',self.s)
         return self.qty*(s-self.s0)
 
     def price(self,**kwargs):
@@ -1484,33 +1423,23 @@ class OptionPortfolio:
     '''A Class for holding and analyzing a portfolio of options
     `args`: a list of Option objects
     '''
-    delta_hedge = None
-
     def __init__(self,*args,**kwargs):
         args = list(args)
-        self.delta_hedge = kwargs.get('delta_hedge')
         self._mod = kwargs.get('mod')
 
         for idx, component in enumerate(args):
-            if isinstance(component, DeltaHedge):
-                self.delta_hedge = args.pop(idx)
+            if isinstance(component, Stock):
+                self.stock = args.pop(idx)
         self.options = args
+        self.s = max(self.options, key=lambda x: x.s).s
+        self.stock = Stock(qty=self.stock.qty, s=self.s)
+        self.options.append(self.stock)
+        
 
-        if not np.unique([i.s for i in self.options]).size == 1:
+        if not len(set([i.s for i in self.options])) == 1:
             print('Warning: all options must have the same underlying price (using `s` of first options)')
-            # raise ValueError('All options must have the same underlying price')
-        self.s = max(self.options,key=lambda x: x.s)
 
-        if self.delta_hedge:
-            self.delta_hedge = DeltaHedge(s=self.s,qty=-self.delta(),gamma=-self.gamma(),speed=-self.speed(),acceleration=-self.acceleration())
-            self.options.append(self.delta_hedge)
-
-        self.ks = []
-        for i in self.options:
-            if not isinstance(i,Stock):
-                self.ks.append(i.k)
-            else:
-                self.options[self.options.index(i)].s = self.s
+        self.ks = [i.s for i in self.options]
         
 
     def __repr__(self):
@@ -1539,15 +1468,9 @@ class OptionPortfolio:
         return self.value(**kwargs)
 
     def delta(self, **kwargs):
-        changed_hedge = False
-        if self.delta_hedge and 's' in kwargs.keys():
-            changed_hedge = True
-            self.options[-1] = DeltaHedge(s=kwargs['s'],qty=-sum(o.delta(s=kwargs['s']) for o in self.options[:-1]))
 
         result = sum(i.delta(**kwargs) for i in self.options)
 
-        if changed_hedge:
-            self.options[-1] = self.delta_hedge
         if self._mod:
                 result /= 2*self._mod
 
@@ -1609,10 +1532,7 @@ class OptionPortfolio:
         df = pd.DataFrame(data)
         dat = {'':['value','S','K','IV','t','r']}
         format_qty = lambda x: f'+{x}' if x>0 else f'{x}'
-        dat.update({f'Leg {idx+1} ({format_qty(o.qty)}{o.type})':[o.price(),o.s,o.k,o.sigma,o.t,o.r] for idx, o in enumerate(self.options) if not isinstance(o,DeltaHedge)})
-        if self.delta_hedge:
-            sign = '+' if self.delta_hedge.qty > 0 else ''
-            dat.update({f'Delta Hedge ({sign}{round(self.delta_hedge.qty,2)} shares)':[self.delta_hedge.price(),self.delta_hedge.s,'','','','']})
+        dat.update({f'Leg {idx+1} ({format_qty(o.qty)}{o.type})':[o.price(),o.s,o.k,o.sigma,o.t,o.r] for idx, o in enumerate(self.options)})
         df2 = pd.DataFrame(dat)
 
         summary_df = pd.concat({'parameters':df2,'characteristics / greeks':df},axis=1)
@@ -1670,7 +1590,7 @@ class OptionPortfolio:
                 vals = self.value(s=spot,t=1e-6)
                 # print(vals)
             elif var == 'pnl':
-                cost = self.value() if not self.delta_hedge else self.value() + self.delta_hedge.qty*self.delta_hedge.s
+                cost = self.value()
                 plt.plot(spot,self.value(s=spot) - cost)
                 vals = self.value(s=spot,t=1e-6) - cost
             else:
@@ -1695,7 +1615,7 @@ class OptionPortfolio:
                     ax.plot(spot,self.value(s=spot,t=1e-6),label='Payoff at Expiration')
                     ax.legend()
                 elif var == 'pnl':
-                    cost = self.value() if not self.delta_hedge else self.value() + self.delta_hedge.qty*self.delta_hedge.s
+                    cost = self.value()
                     ax.plot(spot,self.value(s=spot,t=t) - cost,label='Value')
                     ax.plot(spot,self.value(s=spot,t=1e-6) - cost,label='Payoff at Expiration')
                     ax.legend()
@@ -1858,7 +1778,10 @@ class HestonModel:
 
     def get_market_data(self):
         self.quote = ws.Stock(self.ticker)
-        self.historical = self.quote.historical(30)
+        self.historical = self.quote.historical(2000)
+        self.historical['vol'] = self.historical.Close.pct_change().add(1).apply(np.log).rolling(10).std()*np.sqrt(252)
+        self.v0_est = self.historical.vol.iloc[-1]
+        self.theta_est = self.historical.Close.pct_change().add(1).apply(np.log).var() * np.sqrt(252)
         self.s = self.quote.price
         self.option_chain = utils.get_options(self.ticker,15)
         # self.option_chain = self.option_chain[((self.option_chain.contractType == 'C')&(self.option_chain.strike > self.s)|(self.option_chain.contractType == 'P')&(self.option_chain.strike <= self.s))]
@@ -1959,7 +1882,7 @@ class HestonModel:
         err = (self.estimate_value_surface(params) - self.value_surface.values)**2
         return np.sum(err)
 
-    def fit(self,cons=False):
+    def fit(self,tol=1e-1,cons=False):
         # v0, rho, kappa, theta, sigma, lambda = args
         params = ['v0', 'rho', 'kappa', 'theta', 'sigma', 'lambda']
         bounds = (
@@ -1973,7 +1896,7 @@ class HestonModel:
         cons = [
             {'type': 'ineq', 'fun': lambda args:  np.abs(2*args[2]*args[3] - args[4]**2)-0.1},
             ]
-        kw = dict(bounds=bounds, tol = 1e-1, method='SLSQP',options={'maxiter':1000})
+        kw = dict(bounds=bounds, tol = tol, method='SLSQP',options={'maxiter':1000})
         if cons:
             kw['constraints'] = cons
         start = time.time()
@@ -1983,6 +1906,7 @@ class HestonModel:
             **kw
             )
         dt = time.time() - start
+        self.opt = res
         self.params_arr = res.x
         self.params = dict(zip(params,res.x))
         print(f'Model Optimized in {round(dt,2)} seconds | SSR: {round(res.fun,3)}\n'+'Parameters:\n' + '\n'.join([f'{k}: {round(v,3)}' for k,v in self.params.items()]))
@@ -2035,14 +1959,20 @@ class HestonOption(Option):
     def value(self,k,t):
         return self.model.value(k=k,t=t)
 
-    def fit(self):
-        self.model.fit()
+    def fit(self,tol=1e-1,cons=False):
+        self.model.fit(tol,cons)
         self.engine = VanillaOption(s=self.s,k=self.k,t=self.t,sigma=0.3,type=self.type,method=self.method,q=self.q,qty=self.qty)
         self.iv = self.engine.implied_volatility(self.value(self.k,self.t))
         self.engine.sigma = self.iv
         attrs = ['delta','gamma','theta','vega','rho','mu','plot','summary']
         for attr in attrs:
             setattr(self,attr,getattr(self.engine,attr))
+
+    def implied_volatility(self, k, t):
+        if k is not None and t is not None:
+            price = self.value(k,t)
+            engine = self.engine.update(inplace=False,k=k,t=t)
+            return engine.implied_volatility(price)
 
 class VarianceSwap(OptionPortfolio):
 
@@ -2128,7 +2058,7 @@ class VarianceSwap(OptionPortfolio):
                     ax.plot(sigma,self.value(sigma=sigma,t=1e-6),label='Payoff at Expiration')
                     ax.legend()
                 elif var == 'pnl':
-                    cost = self.value() if not self.delta_hedge else self.value() + self.delta_hedge.qty*self.delta_hedge.s
+                    cost = self.value()
                     ax.plot(sigma,self.value(sigma=sigma,t=t) - cost,label='Value')
                     ax.plot(sigma,self.value(sigma=sigma,t=1e-6) - cost,label='Payoff at Expiration')
                     ax.legend()

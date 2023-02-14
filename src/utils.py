@@ -213,6 +213,26 @@ def put_call_ratio(ticker, exp=None):
     value_counts = options.groupby(['contractType','expiration']).openInterest.sum()
     return value_counts['P'] / value_counts['C']
 
+def plot_option_interest(ticker,exp=None,net=False):
+    options = get_options(ticker,exp)
+    stock = ws.Stock(ticker)
+    options = options[(options.strike > stock.price*0.8)&(options.strike< stock.price*1.2)]
+    tbl = options.groupby(['contractType','strike']).openInterest.sum()
+
+    if net:
+        diff_tbl = tbl.C - tbl.P
+        plt.bar(diff_tbl.index,diff_tbl.values,color = np.where(diff_tbl.values>0,'green','red'))
+        plt.axvline(stock.price, color='black', linestyle='--')
+        word = 'Net'
+    else:
+        plt.bar(tbl.C.index,tbl.C.values,color='green')
+        plt.bar(tbl.P.index,-tbl.P.values,color='red')
+        plt.axvline(stock.price, color='black', linestyle='--')
+        word = ''
+    plt.axhline(0, color='black')
+    plt.grid()
+    plt.title(f'{ticker} {word} Option Open Interest')
+
 def get_sp500():
     sp500 = pd.read_html('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies')[0]
     return sp500
