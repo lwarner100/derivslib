@@ -83,6 +83,20 @@ def get_trading_days(start_date=None,end_date=None):
     business_days = pd.bdate_range(start=start_date, end=end_date)
     return business_days.drop(holidays)
 
+def is_trading_day(date=None):
+    delta = datetime.timedelta(days=1)
+    if date is not None:
+        date = pd.to_datetime(date)
+    else:
+        date = pd.Timestamp.today()
+
+    if hasattr(date,'__iter__'):
+        result = np.isin(date,get_trading_days(start_date=np.min(date)-delta,end_date=np.max(date)+delta))
+        return result if result.size > 1 else result.base[0]
+        
+    return date in get_trading_days(start_date=date-delta,end_date=date+delta)
+
+
 def get_end_of_week(date=None):
     if date is not None:
         date = pd.to_datetime(date)
@@ -138,9 +152,11 @@ def get_yield_curve(from_treasury=False):
     r = requests.get(url)
     df = pd.read_csv(pd.io.common.StringIO(r.text))
     df.columns = ['description',1/12,0.25,0.5,1.,2.,3.,5.,7.,10.,20.,30.]
-    yc_df = pd.DataFrame({'mat':df.columns[1:].values.astype(float),'rate':df.iloc[-1,1:].values.astype(float) / 100,'date':df.iloc[-1,0]})
+    df = df[df!='ND'].dropna()
 
+    yc_df = pd.DataFrame({'mat':df.columns[1:].values.astype(float),'rate':df.iloc[-1,1:].values.astype(float) / 100,'date':df.iloc[-1,0]})
     ff_df = pd.DataFrame({'mat':[1/365],'rate':[fed_funds],'date':[yc_df.date.iloc[0]]})
+    
     result = pd.concat((ff_df,yc_df)).reset_index(drop=True)
 
     return result
@@ -213,10 +229,17 @@ def put_call_ratio(ticker, exp=None):
     value_counts = options.groupby(['contractType','expiration']).openInterest.sum()
     return value_counts['P'] / value_counts['C']
 
-def plot_option_interest(ticker,exp=None,net=False):
+def option_walls(ticker,exp=3,xrange=0.1,n=5):
     options = get_options(ticker,exp)
     stock = ws.Stock(ticker)
-    options = options[(options.strike > stock.price*0.8)&(options.strike< stock.price*1.2)]
+    options = options[(options.strike > stock.price*(1-xrange))&(options.strike< stock.price*(1+xrange))]
+    tbl = options.groupby(['contractType','strike']).openInterest.sum()
+    return tbl.sort_values(ascending=False).groupby('contractType').head(n).sort_index(ascending=False)
+
+def plot_option_interest(ticker,exp=None,net=False,xrange=0.2):
+    options = get_options(ticker,exp)
+    stock = ws.Stock(ticker)
+    options = options[(options.strike > stock.price*(1-xrange))&(options.strike< stock.price*(1+xrange))]
     tbl = options.groupby(['contractType','strike']).openInterest.sum()
 
     if net:

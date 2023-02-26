@@ -184,7 +184,7 @@ class BinomialOption(Option):
 
     @classmethod
     def from_symbol(cls, symbol, **kwargs):
-        '''`symbol` must be of the format {TICKER}{YY}{MM}{DD}{TYPE}{K}
+        '''`symbol` must be of the format {TICKER}{YY}{MM}{DD}{TYPE}{K}\n
         ex. IWM230317P184'''
         kw = cls.parse_symbol(symbol)
         kw.update(kwargs)
@@ -351,7 +351,7 @@ class BinomialOption(Option):
         return abs(self.qty)*result[0]
 
     def vega(self, **kwargs):
-        result = self.deriv(lambda x: self.value(sigma=x, **kwargs), self.sigma, dx=1e-2)
+        result = self.deriv(lambda x: self.value(sigma=x, **kwargs), self.sigma, dx=2.5e-2)
 
         return abs(self.qty)*result / 100
 
@@ -508,7 +508,7 @@ class BSOption(Option):
 
         self.price = self.value
         self.default_params = {param:self.__dict__.get(param) for param in self.params}
-        self.norm_cdf = scipy.stats.norm.cdf
+        self.norm_cdf = scipy.special.ndtr #scipy.stats.norm.cdf
         self.deriv = scipy.misc.derivative
 
     def __neg__(self):
@@ -532,7 +532,7 @@ class BSOption(Option):
 
     @classmethod
     def from_symbol(cls, symbol, **kwargs):
-        '''`symbol` must be of the format {TICKER}{YY}{MM}{DD}{TYPE}{K}
+        '''`symbol` must be of the format {TICKER}{YY}{MM}{DD}{TYPE}{K}\n
         ex. IWM230317P184'''
         kw = cls.parse_symbol(symbol)
         kw.update(kwargs)
@@ -623,7 +623,9 @@ class BSOption(Option):
         '''dValue / dq'''
         self.__dict__.update(kwargs)
 
-        result = self.deriv(lambda x: self.value(q=x), self.q, dx=1e-6, n=1)
+        result = self.s*np.exp(-self.q*self.t)*self.norm_cdf(self.d1())
+        if self.type == 'C':
+            result *= -1
 
         if kwargs:
             self.reset_params()
@@ -674,9 +676,9 @@ class BSOption(Option):
         self.__dict__.update(kwargs)
 
         if self.type == 'C':
-            result = -self.s * scipy.stats.norm.pdf(self.d1()) * self.sigma / (2 * np.sqrt(self.t)) - self.r * self.k * np.exp(-self.r * self.t) * scipy.stats.norm.cdf(self.d2())
+            result = -self.s * scipy.stats.norm._pdf(self.d1()) * self.sigma / (2 * np.sqrt(self.t)) - self.r * self.k * np.exp(-self.r * self.t) * scipy.stats.norm.cdf(self.d2())
         elif self.type == 'P':
-            result = -self.s * scipy.stats.norm.pdf(self.d1()) * self.sigma / (2 * np.sqrt(self.t)) + self.r * self.k * np.exp(-self.r * self.t) * scipy.stats.norm.cdf(-self.d2())
+            result = -self.s * scipy.stats.norm._pdf(self.d1()) * self.sigma / (2 * np.sqrt(self.t)) + self.r * self.k * np.exp(-self.r * self.t) * scipy.stats.norm.cdf(-self.d2())
 
         result = result/365
 
@@ -880,7 +882,7 @@ class MCOption(Option):
 
     @classmethod
     def from_symbol(cls, symbol, **kwargs):
-        '''`symbol` must be of the format {TICKER}{YY}{MM}{DD}{TYPE}{K}
+        '''`symbol` must be of the format {TICKER}{YY}{MM}{DD}{TYPE}{K}\n
         ex. IWM230317P184'''
         kw = cls.parse_symbol(symbol)
         kw.update(kwargs)
@@ -1432,8 +1434,9 @@ class OptionPortfolio:
                 self.stock = args.pop(idx)
         self.options = args
         self.s = max(self.options, key=lambda x: x.s).s
-        self.stock = Stock(qty=self.stock.qty, s=self.s)
-        self.options.append(self.stock)
+        if hasattr(self,'stock'):
+            self.stock = Stock(qty=self.stock.qty, s=self.s)
+            self.options.append(self.stock)
         
 
         if not len(set([i.s for i in self.options])) == 1:
@@ -1752,9 +1755,9 @@ class BarrierOption:
     def __new__(cls, *args, **kwargs):
         method = cls.valid_methods.get(kwargs.pop('method').replace(' ','').lower())
 
-        if kwargs.get('style') and kwargs.get('style').lower() in ['a','american']:
+        if method != 'binomial' and kwargs.get('style') and kwargs.get('style').lower() in ['a','american']:
             method = 'binomial'
-            print('Defaulting to binomial method for American style options')
+            print('Defaulting to Binomial Tree pricing for American options')
         if method == 'mc':
             return MCBarrierOption(*args, **kwargs)
         elif method == 'bs':
@@ -1909,7 +1912,9 @@ class HestonModel:
         self.opt = res
         self.params_arr = res.x
         self.params = dict(zip(params,res.x))
-        print(f'Model Optimized in {round(dt,2)} seconds | SSR: {round(res.fun,3)}\n'+'Parameters:\n' + '\n'.join([f'{k}: {round(v,3)}' for k,v in self.params.items()]))
+        # output_df = pd.DataFrame(data = {'value':self.params.values()}, index = self.params.keys()).round(4)
+        # return output_df.style.set_caption(f'Time elapse: {round(dt,2)}s\nSSR: {round(res.fun,3)}')
+        print(f'Model optimized in {round(dt,2)} seconds | SSR: {round(res.fun,3)}\n'+'Parameters:\n' + '\n'.join([f'{k}: {round(v,3)}' for k,v in self.params.items()]))
 
     def plot_surfaces(self):
         if not hasattr(self,'params_arr'):
@@ -2172,7 +2177,7 @@ class GEX:
         rel = rel[rel.openInterest > np.quantile(rel.openInterest,quantile)]
         spot = np.linspace(underlying_price*0.66,underlying_price*1.33,50)
         spot = np.sort(np.append(spot,underlying_price))
-        for index, row in rel.iterrows():
+        for _, row in rel.iterrows():
             option = BSOption(
                 s = underlying_price,
                 k = row.strike,
