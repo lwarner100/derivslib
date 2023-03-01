@@ -141,11 +141,10 @@ class BinomialOption(Option):
         else:
             self.t = t
         self.sigma = sigma
-        self.r = r or utils.get_risk_free_rate(self.t)
+        self.r = r if r is not None else utils.get_risk_free_rate(self.t)
         self.q = q
         self.n = n
         self.qty = qty
-        self.pos = 'long' if qty > 0 else 'short'
 
         if type not in self.valid_types.keys():
             raise ValueError('`type` must be call, C, put, or P')
@@ -497,10 +496,9 @@ class BSOption(Option):
         else:
             self.t = t
         self.sigma = sigma
-        self.r = r or utils.get_risk_free_rate(self.t)
+        self.r = r if r is not None else utils.get_risk_free_rate(self.t)
         self.q = q
         self.qty = qty
-        self.pos = 'long' if qty > 0 else 'short'
         if type not in self.valid_types.keys():
             raise ValueError('`type` must be call, C, put, or P')
         else:
@@ -838,7 +836,7 @@ class MCOption(Option):
         else:
             self.t = t
         self.sigma = sigma
-        self.r = r or utils.get_risk_free_rate(self.t)
+        self.r = r if r is not None else utils.get_risk_free_rate(self.t)
         self.q = q
         self.qty = qty
         self.N = int(N)
@@ -851,7 +849,6 @@ class MCOption(Option):
             self.control = []
         else:
             self.control = control
-        self.pos = 'long' if qty > 0 else 'short'
         if type not in self.valid_types.keys():
             raise ValueError('`type` must be call, C, put, or P')
         else:
@@ -1247,9 +1244,8 @@ class MCBarrierOption(MCOption):
         else:
             self.t = t
         self.sigma = sigma
-        self.r = r or utils.get_risk_free_rate(self.t)
+        self.r = r if r is not None else utils.get_risk_free_rate(self.t)
         self.qty = qty
-        self.pos = 'long' if qty > 0 else 'short'
         if type not in self.valid_types.keys():
             raise ValueError('`type` must be call, C, put, or P')
         else:
@@ -1666,7 +1662,7 @@ class DigitalOption(OptionPortfolio):
         else:
             self.t = t
         self.sigma = sigma
-        self.r = r or utils.get_risk_free_rate(self.t)
+        self.r = r if r is not None else utils.get_risk_free_rate(self.t)
         self.type = type
         self.qty = qty
         self.precision = precision
@@ -1787,6 +1783,7 @@ class HestonModel:
         self.theta_est = self.historical.Close.pct_change().add(1).apply(np.log).var() * np.sqrt(252)
         self.s = self.quote.price
         self.option_chain = utils.get_options(self.ticker,15)
+        self.option_chain = self.option_chain[-(self.option_chain.lastTradeDate - datetime.datetime.today()).dt.days < 5]
         # self.option_chain = self.option_chain[((self.option_chain.contractType == 'C')&(self.option_chain.strike > self.s)|(self.option_chain.contractType == 'P')&(self.option_chain.strike <= self.s))]
         # self.option_chain = self.option_chain[(self.option_chain.strike < 1.33*self.s)&(self.option_chain.strike > 0.66*self.s)]
         val_surf_dict = {}
@@ -1912,8 +1909,6 @@ class HestonModel:
         self.opt = res
         self.params_arr = res.x
         self.params = dict(zip(params,res.x))
-        # output_df = pd.DataFrame(data = {'value':self.params.values()}, index = self.params.keys()).round(4)
-        # return output_df.style.set_caption(f'Time elapse: {round(dt,2)}s\nSSR: {round(res.fun,3)}')
         print(f'Model optimized in {round(dt,2)} seconds | SSR: {round(res.fun,3)}\n'+'Parameters:\n' + '\n'.join([f'{k}: {round(v,3)}' for k,v in self.params.items()]))
 
     def plot_surfaces(self):
@@ -1984,7 +1979,7 @@ class VarianceSwap(OptionPortfolio):
     def __init__(self,realized_vol,k_vol,t,r,s=100,notional=1e3,n=100):
         self.n = n
         self.s = s
-        self.r = r or utils.get_risk_free_rate(self.t)
+        self.r = r if r is not None else utils.get_risk_free_rate(self.t)
         self.t = t
         self.k_vol = k_vol
         self.sigma = realized_vol
@@ -2107,7 +2102,7 @@ class VolSurface:
         else:
             data = utils.get_options(self.ticker,20)
         self.data = data.rename(columns={'expiration':'expiry','impliedVolatility':'mid_iv','contractType':'option_type'})
-
+        self.data = self.data[-(self.data.lastTradeDate - datetime.datetime.today()).dt.days < 5]
         return self.data
 
     def get_vol_surface(self,moneyness=False):
@@ -2177,19 +2172,26 @@ class GEX:
         rel = rel[rel.openInterest > np.quantile(rel.openInterest,quantile)]
         spot = np.linspace(underlying_price*0.66,underlying_price*1.33,50)
         spot = np.sort(np.append(spot,underlying_price))
-        for _, row in rel.iterrows():
+
+        gammas = {}
+        for option_type in ['C','P']:
+            df = rel[rel.contractType == option_type]
+            k = df.strike.values
+            t = utils.date_to_t(df.expiration.values)
+            sigma = df.impliedVolatility.values
+            r = utils.get_risk_free_rate(t)
             option = BSOption(
                 s = underlying_price,
-                k = row.strike,
-                r = 0.04,
-                t = row.expiration,
-                sigma = row.impliedVolatility,
-                type = row.contractType
+                k = k,
+                r = r,
+                t = t,
+                sigma = sigma,
+                type = option_type,
+                qty=df.openInterest.values
             )
-            gams = option.gamma(s=spot)*row.openInterest*row.type_sign*100*underlying_price
-            aggs.update({row.contractSymbol:gams})
+            gammas[option_type] = np.array([np.sum(option.gamma(s=i)) for i in spot])*100*underlying_price
 
-        agg_gammas = np.nansum(list(aggs.values()), axis=0)
+        agg_gammas = gammas['C'] - gammas['P']
         nearest_gamma = np.abs(spot - underlying_price).argmin()
 
         if gamma_shifts:
