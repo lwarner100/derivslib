@@ -1,11 +1,7 @@
 import datetime
-import json
-import httplib2
 import threading
 import os
-import pickle
 import requests
-import concurrent.futures as cf
 import functools
 
 import numpy as np

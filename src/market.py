@@ -16,7 +16,6 @@ import wallstreet as ws
 import yfinance as yf
 import pandas.tseries.holiday
 
-from .cboe import CBOE
 from . import utils
 
 def get_yield_curve(from_treasury=False):
@@ -142,9 +141,9 @@ def dealer_gamma(data, ticker, date, quantile=0.7, r=None):
         date = pd.to_datetime(date).date()
         days = (datetime.date.today() - date).days
         df = stock.historical(days+1)
-        underlying_price = df[df.Date == date].Close.iloc[0]
+        underlying_price = df[df.Date.dt.date == date].Close.iloc[0]
     else:
-        underlying_price = data[data.Date == date].Close.iloc[0]
+        underlying_price = data[data.date == date].Close.iloc[0]
     chain = data
     rel = chain[(chain.strike > underlying_price*0.66) & (chain.strike < underlying_price*1.33)].copy()
     rel = rel[rel.openInterest > np.quantile(rel.openInterest,quantile)]
@@ -211,18 +210,11 @@ class VolSurface:
         self.ticker = ticker
         self.moneyness = moneyness
         self.source = source
-        if self.source.lower() == 'cboe':
-            self.client = CBOE()
         self.underlying = ws.Stock(self.ticker)
         self.spot = self.underlying.price
 
     def get_data(self):
-        if self.source.lower() == 'cboe':
-            calls = self.client.get_options(self.ticker,'C')
-            puts = self.client.get_options(self.ticker,'P')
-            data = pd.concat([calls,puts])
-        else:
-            data = get_options(self.ticker,20)
+        data = get_options(self.ticker,20)
         self.data = data.rename(columns={'expiration':'expiry','impliedVolatility':'mid_iv','contractType':'option_type'})
         self.data = self.data[-(self.data.lastTradeDate - datetime.datetime.today()).dt.days < 5]
         return self.data
@@ -351,90 +343,6 @@ class GEX:
         ax.set_xlabel('Strike')
         ax.set_ylabel('Gamma Exposure')
         ax.axhline(0,color='black')
-        ax.text(underlying_price*1.02, agg_gammas[nearest_gamma], f'${underlying_price:,.2f}', ha='left', va='center', color='white', bbox=dict(facecolor='black', alpha=0.5))
-        ax.legend()
-        ax.grid()
-        plt.show()
-
-class CBOEGEX:
-    '''Object that retrieves the GEX data from the market'''
-    
-    def __init__(self, CLIENT_ID=None, CLIENT_SECRET=None):
-        try:
-            self.client = CBOE()
-        except ValueError:
-            self.client = CBOE(CLIENT_ID,CLIENT_SECRET)
-        self.today = datetime.datetime.today()
-        self.spy = ws.Stock('SPY')
-
-    def get_gex(self,date=None):
-        none_date = date is None
-        if date:
-            if isinstance(date,str):
-                if 'e' in date:
-                    date = self.client.convert_exp_shorthand(date)
-                else:
-                    date = pd.to_datetime(date)
-            month = date.month
-            year = date.year
-            day = date.day or None
-        else:
-            month = self.today.month
-            year = self.today.year
-            day = None
-
-        calls = self.client.get_options('SPY','C')
-        puts = self.client.get_options('SPY','P')
-        data = pd.concat([calls,puts])
-        if not none_date:
-            query = f'exp_month == {month} and exp_year == {year}' if not day else f'exp_month == {month} and exp_year == {year} and exp_day == {day}'
-            data = data.query(query)
-
-        return data.sort_values('strike')
-
-    def plot(self, date=None, quantile=0.7):
-        sequitur = 'for' if date else 'as of'
-        if not date:
-            str_date = self.today.strftime('%m-%d-%Y')
-        elif 'e' in date:
-            date = self.client.convert_exp_shorthand(date)
-            str_date = date.strftime('%m-%d-%Y')
-        else:
-            date = pd.to_datetime(date)
-            str_date = date.strftime('%m-%d-%Y')
-
-        gex = self.get_gex(date)
-        high_interest = gex[gex.agg_gamma > gex.agg_gamma.quantile(quantile)]
-
-        aggs = {}
-        underlying_price = self.spy.price
-        spot = np.linspace(underlying_price*0.66,underlying_price*1.33,50)
-        for i in high_interest.iterrows():
-            i = i[1]
-            option = LiteBSOption(
-                s = underlying_price,
-                k = i.strike,
-                r = 0.04,
-                t = i.expiry,
-                sigma = i.mid_iv,
-                type = i.option_type
-            )
-            gams = np.array([option.gamma(s=x)*i.open_interest*i.dealer_pos*100*underlying_price for x in spot])
-            aggs.update({i.option:gams})
-
-        agg_gammas = np.nansum(list(aggs.values()), axis=0)
-        nearest_gamma = np.abs(spot - underlying_price).argmin()
-        fig, ax = plt.subplots(figsize=(10,6))
-        ax.plot(spot, agg_gammas, label='Dealer Gamma')
-        ax.set_xlim(spot[0],spot[-1])
-        ax.vlines(underlying_price,0,agg_gammas[nearest_gamma],linestyle='--',color='gray')
-        ax.hlines(agg_gammas[nearest_gamma],spot[0],underlying_price,linestyle='--',color='gray')
-        ax.plot(underlying_price, agg_gammas[nearest_gamma], 'o', color='black', label='Spot')
-        ax.set_title(f'Dealer Gamma Exposure {sequitur} {str_date}')
-        ax.set_xlabel('Strike')
-        ax.set_ylabel('Gamma Exposure')
-        ax.axhline(0,color='black')
-        # add text saying the spot price in black text with white outline to the right of the point
         ax.text(underlying_price*1.02, agg_gammas[nearest_gamma], f'${underlying_price:,.2f}', ha='left', va='center', color='white', bbox=dict(facecolor='black', alpha=0.5))
         ax.legend()
         ax.grid()

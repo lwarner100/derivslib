@@ -17,7 +17,6 @@ import wallstreet as ws
 
 import ipywidgets as widgets
 
-from .cboe import CBOE
 from . import utils
 from . import market
 
