@@ -19,6 +19,7 @@ import ipywidgets as widgets
 
 from .cboe import CBOE
 from . import utils
+from . import market
 
 warnings.filterwarnings("ignore", category=RuntimeWarning)
 warnings.filterwarnings("ignore", category=DeprecationWarning)
@@ -52,23 +53,23 @@ class Option:
     default_params = {}
 
     def __init__(self,*args, **kwargs):
-        pass
+        self.date_to_t = utils.date_to_t
 
-    @staticmethod
-    def date_to_t(date):
-        if isinstance(date,str):
-            date = pd.to_datetime(date).date()
-        elif isinstance(date,datetime.datetime):
-            date = date.date()
+    # @staticmethod
+    # def date_to_t(date):
+    #     if isinstance(date,str):
+    #         date = pd.to_datetime(date).date()
+    #     elif isinstance(date,datetime.datetime):
+    #         date = date.date()
 
-        today = pd.Timestamp.today()
-        us_holidays = pd.tseries.holiday.USFederalHolidayCalendar()
-        holidays = us_holidays.holidays(start=today, end=date)
-        b_days = pd.bdate_range(start=today, end=date)
-        trading_days = b_days.drop(holidays)
-        dt = len(trading_days)
-        # dt += today != trading_days[0]
-        return dt/252
+    #     today = pd.Timestamp.today()
+    #     us_holidays = pd.tseries.holiday.USFederalHolidayCalendar()
+    #     holidays = us_holidays.holidays(start=today, end=date)
+    #     b_days = pd.bdate_range(start=today, end=date)
+    #     trading_days = b_days.drop(holidays)
+    #     dt = len(trading_days)
+    #     # dt += today != trading_days[0]
+    #     return dt/252
 
     @staticmethod
     def parse_symbol(symbol):
@@ -82,7 +83,7 @@ class Option:
         sigma = option.implied_volatility()
         div_yield = option.q
         px = round(option.underlying.price,2)
-        r = utils.get_risk_free_rate(utils.date_to_t(exp))
+        r = market.get_risk_free_rate(utils.date_to_t(exp))
 
         kw = {
             's':px,
@@ -108,9 +109,8 @@ class Option:
     def reset_params(self):
         self.__dict__.update(self.default_params)
 
-    def implied_volatility(self, price):
+    def implied_volatility(self, price, guess=0.3):
         f = lambda x: self.value(sigma = x) - price
-        guess = 0.3
         if isinstance(price, np.ndarray):
             shape = price.shape
             f = lambda x: (self.value(sigma = x.reshape(shape), synced=False) - price).flatten()
@@ -132,7 +132,7 @@ class BinomialOption(Option):
     '''
     params = ['s','k','t','sigma','r','q','type','style','n','qty','tree']
 
-    def __init__(self, s=100, k=100, t=1, sigma=0.3, r=0.04, type: str='C', style: str='A', n: int=500, q=0., qty: int=1, **kwargs):
+    def __init__(self, s=100, k=100, t=1, sigma=0.3, r=None, type: str='C', style: str='A', n: int=500, q=0., qty: int=1, **kwargs):
         super().__init__()
         self.s = s
         self.k = k
@@ -141,7 +141,7 @@ class BinomialOption(Option):
         else:
             self.t = t
         self.sigma = sigma
-        self.r = r if r is not None else utils.get_risk_free_rate(self.t)
+        self.r = r if r is not None else market.get_risk_free_rate(self.t)
         self.q = q
         self.n = n
         self.qty = qty
@@ -429,7 +429,7 @@ class BinomialBarrierOption(BinomialOption):
         'knockout':'KO'
     }
 
-    def __init__(self, s=100, k=100, t=1, sigma=0.3, r=0.04, q=0., barrier=120, barrier_type='KI', type: str='C', style: str='A', n: int=50, qty: int = 1, **kwargs):
+    def __init__(self, s=100, k=100, t=1, sigma=0.3, r=None, q=0., barrier=120, barrier_type='KI', type: str='C', style: str='A', n: int=50, qty: int = 1, **kwargs):
         self.barrier = barrier
         if barrier_type.lower() not in self.valid_barriers.keys():
             raise ValueError('`barrier_type` must be KI, knockin, KO, or knockout')
@@ -482,7 +482,7 @@ class BSOption(Option):
     `type`: either \'call\' or \'put\' or abbrevations \'c\' or \'p\'
     `qty`: the number of contracts (sign implies a long or short position)
 
-    >>> bs_call = BSOption(s=100,k=100,t=0.25,sigma=0.3,r=0.04,type=\'call\')
+    >>> bs_call = BSOption(s=100,k=100,t=0.25,sigma=0.3,r=None,type=\'call\')
     >>> bs_call.summary()
     '''
     params = ['s','k','t','sigma','r','q','type']
@@ -496,7 +496,7 @@ class BSOption(Option):
         else:
             self.t = t
         self.sigma = sigma
-        self.r = r if r is not None else utils.get_risk_free_rate(self.t)
+        self.r = r if r is not None else market.get_risk_free_rate(self.t)
         self.q = q
         self.qty = qty
         if type not in self.valid_types.keys():
@@ -820,13 +820,13 @@ class MCOption(Option):
     `M`: the number of simulations
     `control`: the type of control variate to use. Either \'antithetic\', \'delta\', \'gamma\', or \'all\'
 
-    >>> call = MCOption(s=100,k=100,t=0.25,sigma=0.3,r=0.04,type=\'call\',N=1,M=3e5,control=\'all\')
+    >>> call = MCOption(s=100,k=100,t=0.25,sigma=0.3,r=None,type=\'call\',N=1,M=3e5,control=\'all\')
     >>> call.summary()
 
     '''
     params = ['s','k','t','sigma','r','q','type','qty','N','M','control']
     
-    def __init__(self,s=100,k=100,t=1,sigma=0.3,r=0.04,type='call',q=0.,qty=1,N=1,M=20_000,control='antithetic',**kwargs):
+    def __init__(self,s=100,k=100,t=1,sigma=0.3,r=None,type='call',q=0.,qty=1,N=1,M=20_000,control='antithetic',**kwargs):
         super().__init__()
         self.__dict__.update(kwargs)
         self.s = s
@@ -836,7 +836,7 @@ class MCOption(Option):
         else:
             self.t = t
         self.sigma = sigma
-        self.r = r if r is not None else utils.get_risk_free_rate(self.t)
+        self.r = r if r is not None else market.get_risk_free_rate(self.t)
         self.q = q
         self.qty = qty
         self.N = int(N)
@@ -1230,7 +1230,7 @@ class MCBarrierOption(MCOption):
 
     params = ['s','k','t','sigma','r','type','barrier','barrier_type','qty','N','M','control']
 
-    def __init__(self,s=100,k=100,t=1,sigma=0.3,r=0.04,type='call',qty=1, method='mc',barrier=120, barrier_type='KI', N=1, M=20_000, **kwargs):
+    def __init__(self,s=100,k=100,t=1,sigma=0.3,r=None,type='call',qty=1, method='mc',barrier=120, barrier_type='KI', N=1, M=20_000, **kwargs):
         self.kwargs = kwargs
         self.method = method.lower()
         self.control = kwargs.get('control',[])
@@ -1244,7 +1244,7 @@ class MCBarrierOption(MCOption):
         else:
             self.t = t
         self.sigma = sigma
-        self.r = r if r is not None else utils.get_risk_free_rate(self.t)
+        self.r = r if r is not None else market.get_risk_free_rate(self.t)
         self.qty = qty
         if type not in self.valid_types.keys():
             raise ValueError('`type` must be call, C, put, or P')
@@ -1344,7 +1344,7 @@ class MCBarrierOption(MCOption):
 class AsianOption(MCOption):
 
 
-    def __init__(self, s=100,k=100,t=1,sigma=0.3,r=0.04,type='call',qty=1,N=1,M=300_000,control='antithetic',**kwargs):
+    def __init__(self, s=100,k=100,t=1,sigma=0.3,r=None,type='call',qty=1,N=1,M=300_000,control='antithetic',**kwargs):
         super().__init__(s=s,k=k,t=t,sigma=sigma,r=r,type=type,qty=qty,N=N,M=M,control=control,**kwargs)
         if 'delta' in self.control or 'gamma' in self.control:
             raise ValueError('Asian options can only take antithetic or no control.')
@@ -1647,7 +1647,7 @@ class DigitalOption(OptionPortfolio):
     `precision`: the shift in `k` when calculating the limit of a spread
     '''
 
-    def __init__(self, s=100,k=100,t=1,sigma=0.3,r=0.04,type='C',qty=1, precision=1e-6):
+    def __init__(self, s=100,k=100,t=1,sigma=0.3,r=None,type='C',qty=1, precision=1e-6):
         type_coeff = 1 if type=='C' else -1
         self.components = [
             BSOption(s=s,k=k+(type_coeff*precision),t=t,sigma=sigma,r=r,type=type,qty=-qty),
@@ -1662,7 +1662,7 @@ class DigitalOption(OptionPortfolio):
         else:
             self.t = t
         self.sigma = sigma
-        self.r = r if r is not None else utils.get_risk_free_rate(self.t)
+        self.r = r if r is not None else market.get_risk_free_rate(self.t)
         self.type = type
         self.qty = qty
         self.precision = precision
@@ -1688,7 +1688,7 @@ class DigitalOption(OptionPortfolio):
 
 class BSBarrierOption(OptionPortfolio):
 
-    def __init__(self,s=100,k=100,t=1,sigma=0.3,r=0.04,type='call', qty=1,barrier=120, barrier_type='KI'):
+    def __init__(self,s=100,k=100,t=1,sigma=0.3,r=None,type='call', qty=1,barrier=120, barrier_type='KI'):
         spread = abs(barrier - k)
         coeff = 1 if barrier_type == 'KI' else -1
         self.components = [
@@ -1782,8 +1782,9 @@ class HestonModel:
         self.v0_est = self.historical.vol.iloc[-1]
         self.theta_est = self.historical.Close.pct_change().add(1).apply(np.log).var() * np.sqrt(252)
         self.s = self.quote.price
-        self.option_chain = utils.get_options(self.ticker,15)
-        self.option_chain = self.option_chain[-(self.option_chain.lastTradeDate - datetime.datetime.today()).dt.days < 5]
+        self.option_chain = market.get_options(self.ticker,15)
+        self.option_chain = self.option_chain[-(self.option_chain.lastTradeDate - datetime.datetime.today()).dt.days < 4]
+        self.option_chain = self.option_chain[utils.date_to_t(self.option_chain.expiration)<2]
         # self.option_chain = self.option_chain[((self.option_chain.contractType == 'C')&(self.option_chain.strike > self.s)|(self.option_chain.contractType == 'P')&(self.option_chain.strike <= self.s))]
         # self.option_chain = self.option_chain[(self.option_chain.strike < 1.33*self.s)&(self.option_chain.strike > 0.66*self.s)]
         val_surf_dict = {}
@@ -1802,7 +1803,7 @@ class HestonModel:
 
     def value_params(self, s, k, t, v0, kappa, theta, sigma, rho, lambd, r=None):
         if r is None:
-            r = utils.get_risk_free_rate(t)
+            r = market.get_risk_free_rate(t)
         
         def char_func(phi):
             nonlocal s, k, t, v0, kappa, theta, sigma, rho, lambd, r
@@ -1839,7 +1840,7 @@ class HestonModel:
         v[0] = v0
         s[0] = s
         dt = T/N
-        r = utils.get_risk_free_rate(T)
+        r = market.get_risk_free_rate(T)
 
         for i in range(N):
             v[i+1,:] = v[i,:] + kappa*(theta - v[i,:])*dt + (sigma * v[i,:]**0.5 * Zv[i,:] * dt**0.5)
@@ -1852,7 +1853,7 @@ class HestonModel:
             st = self.simulate(*self.params,T=t)[0]
         elif st is None and not hasattr(self,'params'):
             raise ValueError('Must pass either `st` or run `fit()` to get `params`')
-        r = utils.get_risk_free_rate(t)
+        r = market.get_risk_free_rate(t)
         if isinstance(k,(int,float)):
             cT = np.maximum(st[-1,:]-k,0) if self.option_type=='C' else np.maximum(k-st[-1,:],0)
             return np.exp(-r*t) * np.nanmean(cT)
@@ -1878,12 +1879,17 @@ class HestonModel:
 
         return surface
 
-    def get_loss(self,params):
+    def mape(self,params):
+        err = np.abs((self.estimate_value_surface(params)/self.value_surface.values) - 1)
+        return np.mean(err)
+    
+    def ssr(self,params):
         err = (self.estimate_value_surface(params) - self.value_surface.values)**2
         return np.sum(err)
 
-    def fit(self,tol=1e-1,cons=False):
+    def fit(self,tol=1e-2,cons=False,loss='mape'):
         # v0, rho, kappa, theta, sigma, lambda = args
+        loss = loss.lower() if loss.lower() in ['mape','ssr'] else 'ssr'
         params = ['v0', 'rho', 'kappa', 'theta', 'sigma', 'lambda']
         bounds = (
             (0.0,0.5),
@@ -1901,7 +1907,7 @@ class HestonModel:
             kw['constraints'] = cons
         start = time.time()
         res = scipy.optimize.minimize(
-            self.get_loss,
+            self.mape if loss == 'mape' else self.ssr,
             [0.1,-0.5,1.5,0.1,0.3,0.5],
             **kw
             )
@@ -1909,7 +1915,7 @@ class HestonModel:
         self.opt = res
         self.params_arr = res.x
         self.params = dict(zip(params,res.x))
-        print(f'Model optimized in {round(dt,2)} seconds | SSR: {round(res.fun,3)}\n'+'Parameters:\n' + '\n'.join([f'{k}: {round(v,3)}' for k,v in self.params.items()]))
+        print(f'Model optimized in {round(dt,2)} seconds | {loss.upper()}: {round(res.fun,3)}\n'+'Parameters:\n' + '\n'.join([f'{k}: {round(v,3)}' for k,v in self.params.items()]))
 
     def plot_surfaces(self):
         if not hasattr(self,'params_arr'):
@@ -1959,8 +1965,8 @@ class HestonOption(Option):
     def value(self,k,t):
         return self.model.value(k=k,t=t)
 
-    def fit(self,tol=1e-1,cons=False):
-        self.model.fit(tol,cons)
+    def fit(self,tol=1e-1,cons=False, loss='mape'):
+        self.model.fit(tol,cons,loss)
         self.engine = VanillaOption(s=self.s,k=self.k,t=self.t,sigma=0.3,type=self.type,method=self.method,q=self.q,qty=self.qty)
         self.iv = self.engine.implied_volatility(self.value(self.k,self.t))
         self.engine.sigma = self.iv
@@ -1979,7 +1985,7 @@ class VarianceSwap(OptionPortfolio):
     def __init__(self,realized_vol,k_vol,t,r,s=100,notional=1e3,n=100):
         self.n = n
         self.s = s
-        self.r = r if r is not None else utils.get_risk_free_rate(self.t)
+        self.r = r if r is not None else market.get_risk_free_rate(self.t)
         self.t = t
         self.k_vol = k_vol
         self.sigma = realized_vol
@@ -2078,245 +2084,6 @@ class VarianceSwap(OptionPortfolio):
             output = interactive_plot.children[-1]
             output.layout.height = '450px'
             return interactive_plot
-
-class VolSurface:
-    '''Object that retrieves the volatility surface from the market for a given underlying
-    `underlying`: the underlying ticker
-    `moneyness`: boolean to determine whether to use abolute strikes or % moneyness
-    `source`: the source of the data, either \'CBOE\' or \'wallstreet\''''
-
-    def __init__(self, ticker, moneyness=False, source='wallstreet'):
-        self.ticker = ticker
-        self.moneyness = moneyness
-        self.source = source
-        if self.source.lower() == 'cboe':
-            self.client = CBOE()
-        self.underlying = ws.Stock(self.ticker)
-        self.spot = self.underlying.price
-
-    def get_data(self):
-        if self.source.lower() == 'cboe':
-            calls = self.client.get_options(self.ticker,'C')
-            puts = self.client.get_options(self.ticker,'P')
-            data = pd.concat([calls,puts])
-        else:
-            data = utils.get_options(self.ticker,20)
-        self.data = data.rename(columns={'expiration':'expiry','impliedVolatility':'mid_iv','contractType':'option_type'})
-        self.data = self.data[-(self.data.lastTradeDate - datetime.datetime.today()).dt.days < 5]
-        return self.data
-
-    def get_vol_surface(self,moneyness=False):
-        if not hasattr(self,'data'):
-            self.data = self.get_data()
-
-        vol_data = self.data[['strike','mid_iv','expiry','option_type']]
-        vol_data = vol_data[((vol_data.strike >= self.spot)&(vol_data.option_type=='C'))|((vol_data.strike < self.spot)&(vol_data.option_type=='P'))]
-        if moneyness:
-            vol_data['strike'] = (vol_data.strike / self.spot)*100
-        
-        self.surface = vol_data.sort_values(['expiry','strike'])
-        
-        return self.surface
-
-    def skew_plot(self,*args):
-        if not hasattr(self,'surface'):
-            self.surface = self.get_vol_surface(moneyness=self.moneyness)
-
-        idx = 0
-        if args:
-            idx = [int(i) for i in args if str(i).isnumeric()]
-
-        tbl = self.surface.pivot_table('mid_iv','strike','expiry').dropna()
-        tbl.iloc[:,idx].plot()
-        ttl = tbl.columns[idx][0].strftime('Expiration: %m-%d-%Y') if idx!=0 else tbl.columns[idx].strftime('Expiration: %m-%d-%Y')
-        plt.title(ttl)
-        if self.moneyness:
-            plt.xlabel('strike (% moneyness)')
-        plt.plot()
-
-    def surface_plot(self):
-        if not hasattr(self,'surface'):
-            self.surface = self.get_vol_surface(moneyness=self.moneyness)
-
-        # fig = go.Figure(data=[go.Mesh3d(x=self.surface.strike, y=self.surface.expiry, z=self.surface.mid_iv, intensity=self.surface.mid_iv)])
-        fig = go.Figure(data=[go.Surface(x=self.surface_table.columns, y=self.surface_table.index, z=self.surface_table.values)])
-
-        fig.show()
-
-    @property
-    def surface_table(self):
-        if not hasattr(self,'surface'):
-            self.surface = self.get_vol_surface(moneyness=self.moneyness)
-        return self.surface.pivot_table('mid_iv','strike','expiry').dropna(axis=0)
-
-class GEX:
-
-    def __init__(self,ticker: str = 'SPY'):
-        self.ticker = ticker
-        self.today = datetime.datetime.today()
-        self.ws_objs = {
-            self.ticker:ws.Stock(self.ticker),
-            'SPY':ws.Stock('SPY'),
-            '^SPX':ws.Stock('^SPX')
-        }
-
-    def bs_gamma(self, s, k, t, sigma, r):
-        d1 = (np.log(s/(k*((1+r)**-t))) + ((0.5*sigma**2))*t)/(sigma*(t**0.5))
-        return np.exp(-(d1)**2/2)/np.sqrt(2*np.pi)/(s*sigma*np.sqrt(t))
-
-    def dealer_gamma(self, date=None, quantile=0.7, gamma_shifts=False):
-        aggs = {}
-        underlying_price = self.ws_objs[self.ticker].price
-        chain = utils.get_options(self.ticker,date)
-        rel = chain[(chain.strike > underlying_price*0.66) & (chain.strike < underlying_price*1.33)].copy()
-        rel = rel[rel.openInterest > np.quantile(rel.openInterest,quantile)]
-        spot = np.linspace(underlying_price*0.66,underlying_price*1.33,50)
-        spot = np.sort(np.append(spot,underlying_price))
-
-        gammas = {}
-        for option_type in ['C','P']:
-            df = rel[rel.contractType == option_type]
-            k = df.strike.values
-            t = utils.date_to_t(df.expiration.values)
-            sigma = df.impliedVolatility.values
-            r = utils.get_risk_free_rate(t)
-            option = BSOption(
-                s = underlying_price,
-                k = k,
-                r = r,
-                t = t,
-                sigma = sigma,
-                type = option_type,
-                qty=df.openInterest.values
-            )
-            gammas[option_type] = np.array([np.sum(option.gamma(s=i)) for i in spot])*100*underlying_price
-
-        agg_gammas = gammas['C'] - gammas['P']
-        nearest_gamma = np.abs(spot - underlying_price).argmin()
-
-        if gamma_shifts:
-            return agg_gammas, nearest_gamma
-
-        return agg_gammas[nearest_gamma]
-
-    def plot(self, date=None, quantile=0.7):
-        sequitur = 'as of' if date is None or isinstance(date,int) else 'for'
-        if date is None:
-            date = utils.get_next_opex()
-            str_date = date.strftime('%m-%d-%Y')
-        elif isinstance(date,int):
-            str_date = self.today.strftime('%m-%d-%Y')
-        elif 'e' in date:
-            date = utils.convert_exp_shorthand(date)
-            str_date = date.strftime('%m-%d-%Y')
-        else:
-            date = pd.to_datetime(date)
-            str_date = date.strftime('%m-%d-%Y')
-
-        underlying_price = self.ws_objs[self.ticker].price
-        spot = np.linspace(underlying_price*0.66,underlying_price*1.33,50)
-        spot = np.sort(np.append(spot,underlying_price))
-        
-        agg_gammas, nearest_gamma = self.dealer_gamma(date,quantile,gamma_shifts=True)
-        
-        fig, ax = plt.subplots(figsize=(10,6))
-        ax.plot(spot, agg_gammas, label='Dealer Gamma')
-        ax.set_xlim(spot[0],spot[-1])
-        ax.vlines(underlying_price,0,agg_gammas[nearest_gamma],linestyle='--',color='gray')
-        ax.hlines(agg_gammas[nearest_gamma],spot[0],underlying_price,linestyle='--',color='gray')
-        ax.plot(underlying_price, agg_gammas[nearest_gamma], 'o', color='black', label='Spot')
-        ax.set_title(f'Dealer Gamma Exposure {sequitur} {str_date}')
-        ax.set_xlabel('Strike')
-        ax.set_ylabel('Gamma Exposure')
-        ax.axhline(0,color='black')
-        ax.text(underlying_price*1.02, agg_gammas[nearest_gamma], f'${underlying_price:,.2f}', ha='left', va='center', color='white', bbox=dict(facecolor='black', alpha=0.5))
-        ax.legend()
-        ax.grid()
-        plt.show()
-
-class CBOEGEX:
-    '''Object that retrieves the GEX data from the market'''
-    
-    def __init__(self, CLIENT_ID=None, CLIENT_SECRET=None):
-        try:
-            self.client = CBOE()
-        except ValueError:
-            self.client = CBOE(CLIENT_ID,CLIENT_SECRET)
-        self.today = datetime.datetime.today()
-        self.spy = ws.Stock('SPY')
-
-    def get_gex(self,date=None):
-        none_date = date is None
-        if date:
-            if isinstance(date,str):
-                if 'e' in date:
-                    date = self.client.convert_exp_shorthand(date)
-                else:
-                    date = pd.to_datetime(date)
-            month = date.month
-            year = date.year
-            day = date.day or None
-        else:
-            month = self.today.month
-            year = self.today.year
-            day = None
-
-        calls = self.client.get_options('SPY','C')
-        puts = self.client.get_options('SPY','P')
-        data = pd.concat([calls,puts])
-        if not none_date:
-            query = f'exp_month == {month} and exp_year == {year}' if not day else f'exp_month == {month} and exp_year == {year} and exp_day == {day}'
-            data = data.query(query)
-
-        return data.sort_values('strike')
-
-    def plot(self, date=None, quantile=0.7):
-        sequitur = 'for' if date else 'as of'
-        if not date:
-            str_date = self.today.strftime('%m-%d-%Y')
-        elif 'e' in date:
-            date = self.client.convert_exp_shorthand(date)
-            str_date = date.strftime('%m-%d-%Y')
-        else:
-            date = pd.to_datetime(date)
-            str_date = date.strftime('%m-%d-%Y')
-
-        gex = self.get_gex(date)
-        high_interest = gex[gex.agg_gamma > gex.agg_gamma.quantile(quantile)]
-
-        aggs = {}
-        underlying_price = self.spy.price
-        spot = np.linspace(underlying_price*0.66,underlying_price*1.33,50)
-        for i in high_interest.iterrows():
-            i = i[1]
-            option = BSOption(
-                s = underlying_price,
-                k = i.strike,
-                r = 0.04,
-                t = i.expiry,
-                sigma = i.mid_iv,
-                type = i.option_type
-            )
-            gams = np.array([option.gamma(s=x)*i.open_interest*i.dealer_pos*100*underlying_price for x in spot])
-            aggs.update({i.option:gams})
-
-        agg_gammas = np.nansum(list(aggs.values()), axis=0)
-        nearest_gamma = np.abs(spot - underlying_price).argmin()
-        fig, ax = plt.subplots(figsize=(10,6))
-        ax.plot(spot, agg_gammas, label='Dealer Gamma')
-        ax.set_xlim(spot[0],spot[-1])
-        ax.vlines(underlying_price,0,agg_gammas[nearest_gamma],linestyle='--',color='gray')
-        ax.hlines(agg_gammas[nearest_gamma],spot[0],underlying_price,linestyle='--',color='gray')
-        ax.plot(underlying_price, agg_gammas[nearest_gamma], 'o', color='black', label='Spot')
-        ax.set_title(f'Dealer Gamma Exposure {sequitur} {str_date}')
-        ax.set_xlabel('Strike')
-        ax.set_ylabel('Gamma Exposure')
-        ax.axhline(0,color='black')
-        # add text saying the spot price in black text with white outline to the right of the point
-        ax.text(underlying_price*1.02, agg_gammas[nearest_gamma], f'${underlying_price:,.2f}', ha='left', va='center', color='white', bbox=dict(facecolor='black', alpha=0.5))
-        ax.legend()
-        ax.grid()
-        plt.show()
 
 if __name__=='__main__':
     pass
