@@ -4,8 +4,8 @@ with open('requirements.txt') as f:
     requirements = f.read().splitlines()
 
 setup(
-    name='your-package-name',
-    version='1.0.0',
+    name='derivslib',
+    version='0.0.1',
     packages=find_packages(),
     install_requires=requirements,
     entry_points={
