@@ -1,11 +1,23 @@
 from setuptools import setup, find_packages
 
-with open('../requirements.txt') as f:
-    requirements = f.read().splitlines()
+requirements = [
+    'boto3==1.26.104',
+    'httplib2==0.21.0',
+    'ipywidgets==8.0.2',
+    'matplotlib==3.6.0',
+    'numpy==1.23.4',
+    'pandas==2.0.0',
+    'plotly==5.11.0',
+    'requests==2.28.1',
+    'scipy==1.10.1',
+    'seaborn==0.12.2',
+    'wallstreet==0.3.2',
+    'yfinance==0.1.87',
+]
 
 setup(
     name='derivslib',
-    version='0.0.1',
+    version='0.0.2',
     packages=find_packages(),
     install_requires=requirements,
     entry_points={
