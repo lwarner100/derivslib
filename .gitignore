@@ -4,3 +4,4 @@
 /src/__pycache__/
 /dist/
 /derivslib.egg-info/
+/data/credentials.json
