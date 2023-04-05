@@ -13,10 +13,8 @@ import wallstreet as ws
 import yfinance as yf
 import pandas.tseries.holiday
 
-from .derivslib import BSOption
-
 @np.vectorize
-@functools.lru_cache
+@functools.lru_cache(maxsize=None)
 def date_to_t(date, t0=None):
     if isinstance(date,str):
         date = pd.to_datetime(date).date()
