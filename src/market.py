@@ -5,6 +5,7 @@ import concurrent.futures as cf
 import pickle
 import json
 import httplib2
+import http
 
 import numpy as np
 import pandas as pd
@@ -73,53 +74,65 @@ def get_risk_free_rate(t,from_treasury=False):
     return f(t) if arr else f(t).item()
 
 def get_options(ticker,exp=None):
-    http = httplib2.Http()
-    url = f'https://query2.finance.yahoo.com/v7/finance/options/{ticker}'
+    if exp is None:
+        url = f'/v7/finance/options/{ticker}'
+        conn = http.client.HTTPSConnection('query2.finance.yahoo.com')
+        conn.request('GET', f'{url}?getAllData=true')
+        response = conn.getresponse()
 
-    data = json.loads(http.request(url)[1])
-    exps = data['optionChain']['result'][0]['expirationDates']
-    compatible_dts = list(pd.to_datetime(exps,unit='s').date)
-
-    if isinstance(exp,int):
-        exps = exps[:exp]
-    elif isinstance(exp,str):
-        date = pd.to_datetime(exp).date()
-        exps = [exps[compatible_dts.index(date)]]
-    elif hasattr(exp,'year'):
-        date = datetime.date(exp.year,exp.month,exp.day)
-        exps = [exps[compatible_dts.index(date)]]
-    elif isinstance(exp,(list, tuple, np.ndarray)):
-        dates = pd.to_datetime(exp).date
-        exps = [exps[compatible_dts.index(date)] for date in dates]
-    else:
-        pass # Use all expirations
-
-    df = pd.DataFrame()
-
-    def request_api(expiration):
-        nonlocal ticker
-        temp_http = httplib2.Http()
-        date_url = f'http://query2.finance.yahoo.com/v7/finance/options/{ticker}?date={expiration}'
-        data = json.loads(temp_http.request(date_url)[1])
-        calls = pd.DataFrame(data['optionChain']['result'][0]['options'][0]['calls'])
-        puts = pd.DataFrame(data['optionChain']['result'][0]['options'][0]['puts'])
-        return pd.concat([calls,puts])
-
-    executor = cf.ThreadPoolExecutor()
-    futures = [executor.submit(request_api,exp) for exp in exps]
-    df = pd.concat([f.result() for f in futures])
+        data = json.load(response)['optionChain']['result'][0]['options']
+        calls = pd.concat(pd.DataFrame(i['calls']) for i in data)
+        puts = pd.concat(pd.DataFrame(i['puts']) for i in data)
+        df = pd.concat([calls, puts])
     
+    else:
+        Http = httplib2.Http()
+        url = f'https://query2.finance.yahoo.com/v7/finance/options/{ticker}'
+
+        data = json.loads(Http.request(url)[1])
+        exps = data['optionChain']['result'][0]['expirationDates']
+        compatible_dts = list(pd.to_datetime(exps,unit='s').date)
+
+        if isinstance(exp,int):
+            exps = exps[:exp]
+        elif isinstance(exp,str):
+            date = pd.to_datetime(exp).date()
+            exps = [exps[compatible_dts.index(date)]]
+        elif hasattr(exp,'year'):
+            date = datetime.date(exp.year,exp.month,exp.day)
+            exps = [exps[compatible_dts.index(date)]]
+        elif isinstance(exp,(list, tuple, np.ndarray)):
+            dates = pd.to_datetime(exp).date
+            exps = [exps[compatible_dts.index(date)] for date in dates]
+        else:
+            exps = compatible_dts.copy() # Use all expirations
+
+        df = pd.DataFrame()
+
+        def request_api(expiration):
+            nonlocal ticker
+            temp_http = httplib2.Http()
+            date_url = f'http://query2.finance.yahoo.com/v7/finance/options/{ticker}?date={expiration}'
+            data = json.loads(temp_http.request(date_url)[1])
+            calls = pd.DataFrame(data['optionChain']['result'][0]['options'][0]['calls'])
+            puts = pd.DataFrame(data['optionChain']['result'][0]['options'][0]['puts'])
+            return pd.concat([calls,puts])
+
+        executor = cf.ThreadPoolExecutor()
+        futures = [executor.submit(request_api,exp) for exp in exps]
+        df = pd.concat([f.result() for f in futures])
+        
     df['contractType'] = df.contractSymbol.str[-9]
+    df['expiration'] = pd.to_datetime(df.expiration,unit='s').dt.date
 
     df = (df
             .assign(
                 type_sign=np.where(df.contractType == 'C', 1, -1),
                 openInterest=df.openInterest.fillna(0),
-                expiration=pd.to_datetime(df.expiration,unit='s').dt.date,
                 lastTradeDate=pd.to_datetime(df.lastTradeDate,unit='s')
             )
         )
-
+    
     return df
 
 
@@ -166,12 +179,11 @@ def dealer_gamma(data, ticker, date, quantile=0.7, r=None):
             type = option_type,
             qty=df.openInterest.values
         )
-        gammas[option_type] = np.array([np.sum(option.gamma(s=i)) for i in spot])*100*underlying_price
+        gammas[option_type] = np.sum(option.gamma(s=underlying_price))*100*underlying_price
 
     agg_gammas = gammas['C'] - gammas['P']
-    nearest_gamma = np.abs(spot - underlying_price).argmin()
 
-    return agg_gammas[nearest_gamma]
+    return agg_gammas
 
 def option_walls(ticker,exp=3,xrange=0.1,n=5):
     options = get_options(ticker,exp)
@@ -283,13 +295,12 @@ class GEX:
         underlying_price = self.ws_objs[self.ticker].price
         chain = get_options(self.ticker,date)
         rel = chain[(chain.strike > underlying_price*0.66) & (chain.strike < underlying_price*1.33)].copy()
-        rel = rel[rel.openInterest > np.quantile(rel.openInterest,quantile)]
+        # rel = rel[rel.openInterest > np.quantile(rel.openInterest,quantile)]
         spot = np.linspace(underlying_price*0.66,underlying_price*1.33,50)
         spot = np.sort(np.append(spot,underlying_price))
-
         gammas = {}
         for option_type in ['C','P']:
-            df = rel[rel.contractType == option_type]
+            df = rel[rel.contractType == option_type].copy()
             k = df.strike.values
             t = utils.date_to_t(df.expiration.values)
             sigma = df.impliedVolatility.values

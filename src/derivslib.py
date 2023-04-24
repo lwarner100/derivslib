@@ -54,22 +54,6 @@ class Option:
     def __init__(self,*args, **kwargs):
         self.date_to_t = utils.date_to_t
 
-    # @staticmethod
-    # def date_to_t(date):
-    #     if isinstance(date,str):
-    #         date = pd.to_datetime(date).date()
-    #     elif isinstance(date,datetime.datetime):
-    #         date = date.date()
-
-    #     today = pd.Timestamp.today()
-    #     us_holidays = pd.tseries.holiday.USFederalHolidayCalendar()
-    #     holidays = us_holidays.holidays(start=today, end=date)
-    #     b_days = pd.bdate_range(start=today, end=date)
-    #     trading_days = b_days.drop(holidays)
-    #     dt = len(trading_days)
-    #     # dt += today != trading_days[0]
-    #     return dt/252
-
     @staticmethod
     def parse_symbol(symbol):
         end_sym = [char.isdigit() for idx, char in enumerate(symbol)].index(True)
@@ -369,17 +353,41 @@ class BinomialOption(Option):
         return abs(self.qty)*result / 100
 
     def plot(self,var='value',resolution=25, **kwargs):
-        '''`var` must be either \'value\', \'delta\', \'gamma\', \'vega\', \'theta\', \'rho\', \'payoff\', or  \'pnl\''''
-        greeks = {'value','delta','gamma','vega','rho','theta','pnl','payoff'}
+        '''`var` must be either \'value\', \'delta\', \'gamma\', \'vega\', \'theta\', \'rho\', \'payoff\', \'summary\', or  \'pnl\''''
+        greeks = {'value','delta','gamma','vega','rho','theta','pnl','payoff','summary'}
         self.__dict__.update(kwargs)
 
         if kwargs:
             self.get_secondary_params()
 
         if var not in greeks: 
-            raise ValueError('`var` must be either value, delta, gamma, vega, theta, rho, payoff, pnl')
+            raise ValueError('`var` must be either value, delta, gamma, vega, theta, rho, payoff, pnl, or summary')
 
         spot = np.linspace(self.k*0.66,self.k*1.33,resolution)
+
+        if var == 'summary':
+            var = ['value','delta','gamma','vega','theta','rho']
+
+        if hasattr(var,'__iter__') and all([i in greeks for i in var]):
+            var = [i.lower() for i in var if i not in ('summary','payoff','pnl')]
+            facet_map = {
+                            2:(2,1),
+                            3:(3,1),
+                            4:(2,2),
+                            5:(3,2),
+                            6:(3,2)
+                        }
+            fig, axs = plt.subplots(facet_map.get(len(var))[1],facet_map.get(len(var))[0], figsize=(4*facet_map.get(len(var))[0],3.25*facet_map.get(len(var))[1]))
+            for i, ax in enumerate(axs.flatten()):
+                if i < len(var):
+                    ax.plot(spot, getattr(self,var[i])(s=spot))
+                    ax.set_title(var[i])
+                    ax.axvline(self.k, color='black', linestyle='--', alpha=0.5)
+                    ax.axhline(0, color='black')
+            plt.show()
+            return
+        else:
+            var = var.lower()
 
         if var == 'value' or var == 'delta' or var == 'gamma':
             vals = getattr(self,var)(s=spot)
@@ -389,7 +397,7 @@ class BinomialOption(Option):
             cost = self.value()
             vals = self.qty*self.evaluate(spot) - cost
         else:
-            vals = [getattr(self,var)(s=x) for x in spot]
+            vals = getattr(self,var)(s=spot)
 
         plt.plot(spot,vals)
         if var == 'pnl':
@@ -404,7 +412,9 @@ class BinomialOption(Option):
 
 
     def plot_dist(self):
-        sn.kdeplot(np.concatenate(self.create_list_tree()),fill=True)
+        if not hasattr(self,'tree'):
+            self.create_tree()
+        sn.kdeplot(np.concatenate(self.tree),fill=True)
 
     def show_tree(self):
         tree = self.create_list_tree()
@@ -1342,7 +1352,6 @@ class MCBarrierOption(MCOption):
 
 class AsianOption(MCOption):
 
-
     def __init__(self, s=100,k=100,t=1,sigma=0.3,r=None,type='call',qty=1,N=1,M=300_000,control='antithetic',**kwargs):
         super().__init__(s=s,k=k,t=t,sigma=sigma,r=r,type=type,qty=qty,N=N,M=M,control=control,**kwargs)
         if 'delta' in self.control or 'gamma' in self.control:
@@ -1774,23 +1783,26 @@ class HestonModel:
         if pull_data:
             self.get_market_data()
 
-    def get_market_data(self):
+    def get_market_data(self,option_chain=None):
         self.quote = ws.Stock(self.ticker)
         self.historical = self.quote.historical(2000)
         self.historical['vol'] = self.historical.Close.pct_change().add(1).apply(np.log).rolling(10).std()*np.sqrt(252)
         self.v0_est = self.historical.vol.iloc[-1]
         self.theta_est = self.historical.Close.pct_change().add(1).apply(np.log).var() * np.sqrt(252)
         self.s = self.quote.price
-        self.option_chain = market.get_options(self.ticker,15)
-        self.option_chain = self.option_chain[-(self.option_chain.lastTradeDate - datetime.datetime.today()).dt.days < 4]
-        self.option_chain = self.option_chain[utils.date_to_t(self.option_chain.expiration)<2]
+        self.option_chain = market.get_options(self.ticker,15) if option_chain is None else option_chain
+        t0 = self.option_chain.date.iloc[0] if 'date' in self.option_chain.columns else datetime.date.today()
+        self.option_chain = self.option_chain[-(self.option_chain.lastTradeDate - t0).dt.days < 4]
+        self.option_chain = self.option_chain[utils.date_to_t(self.option_chain.expiration,t0=t0)<2]
+        self.option_chain['strike'] = self.option_chain.strike.astype(np.float64)
+        self.option_chain['lastPrice'] = self.option_chain.strike.astype(np.float64)
         # self.option_chain = self.option_chain[((self.option_chain.contractType == 'C')&(self.option_chain.strike > self.s)|(self.option_chain.contractType == 'P')&(self.option_chain.strike <= self.s))]
         # self.option_chain = self.option_chain[(self.option_chain.strike < 1.33*self.s)&(self.option_chain.strike > 0.66*self.s)]
         val_surf_dict = {}
         for option_type in ['C','P']:
             option_chain = self.option_chain[self.option_chain.contractType==option_type]
             value_surface = option_chain.pivot_table(index='strike',columns='expiration',values='lastPrice').dropna(axis=0)
-            value_surface.columns = value_surface.columns.to_series().apply(utils.date_to_t)
+            value_surface.columns = value_surface.columns.to_series().apply(lambda x: utils.date_to_t(x,t0=t0))
             val_surf_dict[option_type] = value_surface
         self.value_surface = val_surf_dict[self.option_type]
 

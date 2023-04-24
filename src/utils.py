@@ -1,7 +1,5 @@
 import datetime
 import threading
-import os
-import requests
 import functools
 
 import numpy as np
