@@ -6,6 +6,7 @@ import pickle
 import json
 import httplib2
 import http
+import functools
 
 import numpy as np
 import pandas as pd
@@ -72,6 +73,74 @@ def get_risk_free_rate(t,from_treasury=False):
     curve = get_yield_curve(from_treasury=from_treasury)
     f = scipy.interpolate.interp1d(curve.mat.values,curve.rate.values,kind='cubic')
     return f(t) if arr else f(t).item()
+
+@functools.cache
+def get_price(ticker, date):
+    date = pd.to_datetime(date).date()
+    epoch = datetime.datetime.utcfromtimestamp(0)
+
+
+    unix1 = int((utils.get_last_trading_day(date) - epoch.date()).total_seconds())
+    unix2 = int((utils.get_last_trading_day(date + datetime.timedelta(4)) - epoch.date()).total_seconds())
+
+    url = f'/v7/finance/chart/{ticker}'
+    conn = http.client.HTTPSConnection('query2.finance.yahoo.com')
+    conn.request('GET', f'{url}?interval=1d&period1={unix1}&period2={unix2}')
+    response = conn.getresponse()
+    dat = json.load(response)
+
+    price = dat['chart']['result'][0]['indicators']['adjclose'][0]['adjclose'][0]
+
+    return price
+
+def get_bars(ticker, start_date=None, end_date=None, interval='5m'):
+    limit_dict = {
+        '5m':30,
+        '1m':7
+    }
+    if end_date is None:
+        end_date = utils.get_last_trading_day()
+
+    if start_date is None:
+        start_date = limit_dict.get(interval, 30)
+
+    if isinstance(start_date, int):
+        if interval != '1d' and start_date > limit_dict[interval]:
+            start_date = min(start_date, limit_dict[interval])
+            print('Invalid number of days back passed. Defaulting to minimum safe number of days: ', start_date)
+        begin_date = utils.get_last_trading_day() - datetime.timedelta(days=start_date*1.8)
+        if interval == '1m':
+            start_date = datetime.date.today() - datetime.timedelta(days=limit_dict[interval]-1)
+        else:
+            start_date = utils.get_trading_days(begin_date)[-start_date]
+
+    epoch = datetime.datetime.utcfromtimestamp(0)
+    start_date = pd.to_datetime(start_date).date()
+    end_date = pd.to_datetime(end_date).date() + datetime.timedelta(1)
+
+    dates = utils.get_trading_days(start_date, datetime.date.today())
+    if len(dates) > limit_dict.get(interval, np.inf):
+        print('Too many days passed. Defaulting to minimum safe number of days: ', limit_dict[interval])
+        start_date = dates[-limit_dict[interval]]
+        
+    unix1 = int((start_date - epoch.date()).total_seconds())
+    unix2 = int((end_date - epoch.date()).total_seconds())
+
+    url = f'/v7/finance/chart/{ticker}'
+    conn = http.client.HTTPSConnection('query2.finance.yahoo.com')
+    conn.request('GET', f'{url}?interval={interval}&period1={unix1}&period2={unix2}')
+    response = conn.getresponse()
+    r = json.load(response)
+
+
+    data = {'date':r['chart']['result'][0]['timestamp']}
+    data.update(r['chart']['result'][0]['indicators']['quote'][0])
+    
+    df = pd.DataFrame(data)
+    df['date'] = pd.to_datetime(df.date, unit='s') - datetime.timedelta(hours=4)
+    df = df[df['date'].dt.date.isin(utils.get_trading_days(start_date, end_date).date)]
+   
+    return df
 
 def get_options(ticker,exp=None):
     if exp is None:
@@ -184,6 +253,43 @@ def dealer_gamma(data, ticker, date, quantile=0.7, r=None):
     agg_gammas = gammas['C'] - gammas['P']
 
     return agg_gammas
+
+def gamma_walls(df, ticker, date=None):
+    if date is None:
+        date = utils.get_last_trading_day()
+
+    if 'date' in df.columns:
+        df = df[df.date.dt.date == date].copy()
+
+    underlying_price = get_price(ticker, date)
+    rel = df[(df.strike > underlying_price*0.66) & (df.strike < underlying_price*1.33)].copy()
+    spot = np.linspace(underlying_price*0.66,underlying_price*1.33,250)
+    spot = np.sort(np.append(spot,underlying_price))
+    gammas = {}
+
+    for option_type in ['C','P']:
+        df = rel[rel.contractType == option_type].copy()
+        k = df.strike.values
+        t = utils.date_to_t(df.expiration.values,t0=date)
+        sigma = df.impliedVolatility.values
+        r = get_risk_free_rate(t)
+        option = LiteBSOption(
+            s = underlying_price,
+            k = k,
+            r = r,
+            t = t,
+            sigma = sigma,
+            type = option_type,
+            qty=df.openInterest.values
+        )
+        gammas[option_type] = np.array([np.sum(option.gamma(s=i)) for i in spot])*100*spot
+
+    agg_gammas = gammas['C'] - gammas['P']
+    max_gamma = spot[agg_gammas.argmax()]
+    min_gamma = spot[agg_gammas.argmin()]
+    zero_gamma = spot[np.abs(agg_gammas).argmin()]
+
+    return {'max':max_gamma,'min':min_gamma,'zero':zero_gamma}
 
 def option_walls(ticker,exp=3,xrange=0.1,n=5):
     options = get_options(ticker,exp)

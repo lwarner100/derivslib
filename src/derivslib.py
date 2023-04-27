@@ -351,6 +351,11 @@ class BinomialOption(Option):
         result = self.deriv(lambda x: self.value(q=x, **kwargs), self.q, dx=1e-2)
         
         return abs(self.qty)*result / 100
+    
+    def vanna(self, **kwargs):
+        result = self.deriv(lambda x: self.delta(sigma=x, **kwargs), self.sigma, dx=1e-3)
+
+        return abs(self.qty)*result / 100
 
     def plot(self,var='value',resolution=25, **kwargs):
         '''`var` must be either \'value\', \'delta\', \'gamma\', \'vega\', \'theta\', \'rho\', \'payoff\', \'summary\', or  \'pnl\''''
@@ -1990,6 +1995,72 @@ class HestonOption(Option):
             price = self.value(k,t)
             engine = self.engine.update(inplace=False,k=k,t=t)
             return engine.implied_volatility(price)
+
+class MarketOption(Option):
+
+    def __init__(self, underlying, strike=None, expiry=None, type='C', method='binomial', style='A', **kwargs):
+        super().__init__()
+        if any(i.isnumeric() for i in underlying) and strike is None and expiry is None:
+            self.parse_symbol(underlying)
+        else:
+            self.underlying = ''.join(i.upper() for i in underlying if i.isalpha())
+            self.strike = strike
+            self.expiry = expiry
+            self.t = utils.date_to_t(self.expiry).item()
+            self.type = type
+        self.style = style
+        self.method = method
+        self.today = datetime.date.today()
+        self.now = datetime.datetime.now()
+        self.get_market_attributes()
+        self.engine = VanillaOption(
+            s=self.price,
+            k=self.strike,
+            t=self.t,
+            sigma=self.vol_surface(self.strike, self.t).item(),
+            type=self.type,
+            style=self.style,
+            method=self.method,
+            **kwargs
+        )
+
+        for attr in ('value', 'delta', 'gamma', 'vega', 'theta', 'rho','vanna', 'plot', 'summary'):
+            setattr(self, attr, getattr(self.engine, attr))
+
+    def __repr__(self):
+        return f'MarketOption(\'{self.underlying}\', k={self.strike}, t={round(self.t,3)}, type=\'{self.type}\')'
+
+    def parse_symbol(self, symbol):
+        'Must be of the form TICKERYYYYMMDDXXXC where XXX is the strike price'
+        end_ticker = next(i for i, c in enumerate(symbol) if c.isdigit())
+
+        self.underlying = symbol[:end_ticker].upper()
+        self.expiry = datetime.datetime.strptime(symbol[end_ticker:end_ticker+8], '%Y%m%d').date()
+        self.t = utils.date_to_t(self.expiry).item()
+        self.strike = float(symbol[end_ticker+8:-1])
+        self.type = symbol[-1].upper()
+
+
+    def get_market_attributes(self):
+        self.option_chain = market.get_options(self.underlying)
+        self.ws_obj = ws.Stock(self.underlying)
+        self.price = self.ws_obj.price
+        self.dividend_yield = self.ws_obj.dy
+        self.fit_vol_surface()
+
+    def fit_vol_surface(self):
+        last_date = utils.get_last_trading_day(self.today - datetime.timedelta(1))
+        recent_dates = np.array([self.today, last_date])
+
+        df = self.option_chain.copy()
+        df = df[df.contractType=='C']
+        df = df[np.isin(df.lastTradeDate.dt.date, recent_dates)]
+        df['t'] = utils.date_to_t(df.expiration)
+
+        xs = df.strike.values
+        ys = df.t.values
+        zs = df.impliedVolatility.values
+        self.vol_surface = lambda k, t,: scipy.interpolate.griddata((xs, ys), zs, (k,t), method='linear')
 
 class VarianceSwap(OptionPortfolio):
 
