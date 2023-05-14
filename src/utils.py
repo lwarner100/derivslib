@@ -4,16 +4,50 @@ import functools
 
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
-import scipy
-
-import wallstreet as ws
-import yfinance as yf
 import pandas.tseries.holiday
+    
+def date_to_t_minutes(date, t0=None):
+    if isinstance(date,str):
+        if ':' in date:
+            date = pd.to_datetime(date)
+        else:
+            date = pd.to_datetime(date).replace(hour=16, minute=0, second=0, microsecond=0)
+    elif isinstance(date,datetime.date):
+        date = pd.to_datetime(date).replace(hour=16, minute=0, second=0, microsecond=0)
+
+    if isinstance(t0,str):
+        if ':' in t0:
+            t0 = pd.to_datetime(t0)
+        else:
+            t0 = pd.to_datetime(t0).replace(hour=9, minute=30, second=0, microsecond=0)
+    elif isinstance(t0,datetime.date):
+        t0 = pd.to_datetime(t0).replace(hour=9, minute=30, second=0, microsecond=0)
+
+    today = pd.Timestamp.now() if t0 is None else t0
+    end_today = today.replace(hour=16, minute=0, second=0, microsecond=0)
+    start_today = today.replace(hour=9, minute=30, second=0, microsecond=0)
+    market_open = today > start_today and is_trading_day(today.date())
+    if market_open:
+        dt_to_close = today.replace(hour=16, minute=0, second=0, microsecond=0) - today
+        dt_to_close = max(0, dt_to_close.total_seconds() / 60)
+    
+    us_holidays = pd.tseries.holiday.USFederalHolidayCalendar()
+    holidays = us_holidays.holidays(start=today, end=date)
+    minutes_per_day = 6.5*60
+
+    days = len(pd.bdate_range(start=today, end=date)) - len(holidays) - market_open
+    days_minutes = days*minutes_per_day
+    minutes = dt_to_close if market_open else 0
+    dt = (days_minutes + minutes) / minutes_per_day
+    
+    return dt/252
 
 @np.vectorize
 @functools.lru_cache(maxsize=None)
-def date_to_t(date, t0=None):
+def date_to_t(date, t0=None, precision='day'):
+    if 'm' in precision.lower():
+        return date_to_t_minutes(date,t0)
+
     if isinstance(date,str):
         date = pd.to_datetime(date).date()
     elif isinstance(date,datetime.datetime):
@@ -24,6 +58,22 @@ def date_to_t(date, t0=None):
     holidays = us_holidays.holidays(start=today, end=date)
     dt = len(pd.bdate_range(start=today, end=date)) - len(holidays)
     return dt/252
+
+
+@np.vectorize
+@functools.lru_cache(maxsize=None)
+def t_to_date(t, t0=None):
+    if t0 is None:
+        t0 = datetime.date.today()
+    elif isinstance(t0,str):
+        t0 = pd.to_datetime(t0).date()
+    elif isinstance(t0,datetime.datetime):
+        t0 = t0.date()
+
+    days = int(t*252)
+    trading_days = get_trading_days(t0, t0 + datetime.timedelta(days*8/5))
+    return trading_days[days].date()
+
 
 def convert_exp_shorthand(date: str):
     month_map = {

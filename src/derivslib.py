@@ -1,4 +1,3 @@
-import os
 import datetime
 import warnings
 import time
@@ -12,8 +11,6 @@ import pandas.tseries.holiday
 import matplotlib.pyplot as plt
 import plotly.graph_objects as go
 import seaborn as sn
-
-import wallstreet as ws
 
 import ipywidgets as widgets
 
@@ -62,22 +59,27 @@ class Option:
         type_ = symbol[end_sym+6:end_sym+7]
         strike = int(symbol[end_sym+7:])
 
-        option = ws.Call(ticker,d=exp.day,m=exp.month,y=exp.year,strike=strike) if type_ == 'C' else ws.Put(ticker,d=exp.day,m=exp.month,y=exp.year,strike=strike)
-        sigma = option.implied_volatility()
-        div_yield = option.q
-        px = round(option.underlying.price,2)
-        r = market.get_risk_free_rate(utils.date_to_t(exp))
+        all_options = market.get_options(ticker, exp)
+        option = all_options.query('strike == @strike and contractType == @type_')
+        mid_price = ((option['ask'] + option['bid'])/2).values[0]
+        quote = market.get_quote(ticker)
+        q = quote.get('trailingAnnualDividendYield',0)
+        px = round(quote['regularMarketPrice'],2)
+        t = utils.date_to_t(exp).item()
+        # sigma = option.impliedVolatility.values[0]
+        sigma = BinomialOption(s=px, k=strike, t=t, q=q, type=type_,style='A').implied_volatility(mid_price)
+        r = market.get_risk_free_rate(t)
 
         kw = {
             's':px,
             'k':strike,
-            't':exp,
+            't':t,
             'sigma':sigma,
             'r':r,
             'type':type_,
             'style':'A',
             'qty':1,
-            'q':div_yield
+            'q':q
         }
         return kw
 
@@ -99,7 +101,10 @@ class Option:
             f = lambda x: (self.value(sigma = x.reshape(shape), synced=False) - price).flatten()
             guess_arr = np.full_like(price, guess).flatten()
             return scipy.optimize.newton(f, guess_arr, maxiter=100_000_000, tol=1e-10).reshape(shape)
-        return scipy.optimize.newton(f, guess, maxiter=10000)
+        try:
+            return scipy.optimize.newton(f, guess, maxiter=10000)
+        except RuntimeError:
+            return scipy.optimize.bisect(f, -0, 2, maxiter=1000)
 
 class BinomialOption(Option):
     '''Implementation of the Binomial Tree option pricing model
@@ -147,7 +152,7 @@ class BinomialOption(Option):
 
     def __repr__(self):
         sign = '+' if self.qty > 0 else ''
-        return f'{sign}{self.qty} BinomialOption(s={self.s}, k={self.k}, t={round(self.t,4)}, sigma={self.sigma}, r={self.r}, q={self.q}, type={self.type}, style={self.style})'
+        return f'{sign}{self.qty} BinomialOption(s={self.s}, k={self.k}, t={self.t:.4}, sigma={self.sigma:.3}, r={self.r:.3}, q={self.q:.3}, type={self.type}, style={self.style})'
 
     def __neg__(self):
         return BinomialOption(self.s, self.k, self.t, self.sigma, self.r, type = self.type, style=self.style, n=self.n,qty=-self.qty, q=self.q)
@@ -454,7 +459,7 @@ class BinomialBarrierOption(BinomialOption):
 
     def __repr__(self):
         sign = '+' if self.qty > 0 else ''
-        return f'{sign}{self.qty} BarrierOption(s={self.s}, k={self.k}, t={round(self.t,4)}, sigma={self.sigma}, r={self.r}, q={self.q}, barrier={self.barrier}, barrier_type={self.barrier_type}, type={self.type}, style={self.style})'
+        return f'{sign}{self.qty} BarrierOption(s={self.s}, k={self.k}, t={self.t:.4}, sigma={self.sigma:.3}, r={self.r:.3}, q={self.q:.3}, barrier={self.barrier}, barrier_type={self.barrier_type}, type={self.type}, style={self.style})'
 
     def __neg__(self):
         return BinomialBarrierOption(self.s, self.k, self.t, self.sigma, self.r, q=self.q, type=self.type, style=self.style, n=self.n,qty=-self.qty, barrier=self.barrier, barrier_type=self.barrier_type)
@@ -540,7 +545,7 @@ class BSOption(Option):
 
     def __repr__(self):
         sign = '+' if self.qty > 0 else ''
-        return f'{sign}{self.qty} BSOption(s={self.s}, k={self.k}, t={round(self.t,4)}, sigma={self.sigma}, r={self.r}, type={self.type})'
+        return f'{sign}{self.qty} BSOption(s={self.s}, k={self.k}, t={self.t:.4}, sigma={self.sigma:.3}, r={self.r:.3}, q={self.q:.3}, type={self.type})'
 
     @classmethod
     def from_symbol(cls, symbol, **kwargs):
@@ -1550,7 +1555,7 @@ class OptionPortfolio:
         summary_df = pd.concat({'parameters':df2,'characteristics / greeks':df},axis=1)
         return summary_df
 
-    def plot(self,var='pnl', interactive=False, resolution=40, xrange=0.3, **kwargs):
+    def plot(self, var='pnl', interactive=False, resolution=40, xrange=0.3, **kwargs):
         '''`var` must be either \'value\', \'delta\', \'gamma\', \'vega\', \'theta\', \'rho\', \'payoff\', \'pnl\', or \'summary\''''
         greeks = {'value','delta','gamma','speed','vega','vanna','rho','theta','pnl','payoff','summary'}
 
@@ -1789,15 +1794,17 @@ class HestonModel:
             self.get_market_data()
 
     def get_market_data(self,option_chain=None):
-        self.quote = ws.Stock(self.ticker)
-        self.historical = self.quote.historical(2000)
+        self.historical = market.get_price_history(self.ticker, 2000, interval='1d')
+        self.quote = market.get_quote(self.ticker)
+        self.historical.columns = self.historical.columns.str.capitalize()
         self.historical['vol'] = self.historical.Close.pct_change().add(1).apply(np.log).rolling(10).std()*np.sqrt(252)
-        self.v0_est = self.historical.vol.iloc[-1]
-        self.theta_est = self.historical.Close.pct_change().add(1).apply(np.log).var() * np.sqrt(252)
-        self.s = self.quote.price
+        self.v0_est = self.historical.vol.iloc[-1] ** 2
+        self.theta_est = self.historical.Close.pct_change().add(1).apply(np.log).var() * np.sqrt(252) ** 2
+        self.s = self.quote['regularMarketPrice']
+        self.q = self.quote.get('trailingAnnualDividendYield',0)
         self.option_chain = market.get_options(self.ticker,15) if option_chain is None else option_chain
         t0 = self.option_chain.date.iloc[0] if 'date' in self.option_chain.columns else datetime.date.today()
-        self.option_chain = self.option_chain[-(self.option_chain.lastTradeDate - t0).dt.days < 4]
+        self.option_chain = self.option_chain[-(self.option_chain.lastTradeDate.dt.date - t0).astype('timedelta64[s]').dt.days < 4]
         self.option_chain = self.option_chain[utils.date_to_t(self.option_chain.expiration,t0=t0)<2]
         self.option_chain['strike'] = self.option_chain.strike.astype(np.float64)
         self.option_chain['lastPrice'] = self.option_chain.strike.astype(np.float64)
@@ -1806,7 +1813,8 @@ class HestonModel:
         val_surf_dict = {}
         for option_type in ['C','P']:
             option_chain = self.option_chain[self.option_chain.contractType==option_type]
-            value_surface = option_chain.pivot_table(index='strike',columns='expiration',values='lastPrice').dropna(axis=0)
+            option_chain = option_chain.assign(mid=(option_chain.bid + option_chain.ask)/2)
+            value_surface = option_chain.pivot_table(index='strike',columns='expiration',values='mid').dropna(axis=0)
             value_surface.columns = value_surface.columns.to_series().apply(lambda x: utils.date_to_t(x,t0=t0))
             val_surf_dict[option_type] = value_surface
         self.value_surface = val_surf_dict[self.option_type]
@@ -1822,7 +1830,6 @@ class HestonModel:
             r = market.get_risk_free_rate(t)
         
         def char_func(phi):
-            nonlocal s, k, t, v0, kappa, theta, sigma, rho, lambd, r
             a = kappa*theta
             b = kappa+lambd
             rspi = rho*sigma*phi*1j
@@ -1835,9 +1842,8 @@ class HestonModel:
             return t1*t2*t3
 
         def integrand(phi):
-            nonlocal s, k, t, v0, kappa, theta, sigma, rho, lambd, r
             return (np.exp(r*t)*char_func(phi-1j) - k*char_func(phi)) / (1j*phi*k**(1j*phi))
-
+        
         integral = scipy.integrate.quad_vec(integrand, 1e-9, 1e3)[0]
         
         call = (s - k*np.exp(-r*t))/2 + np.real(integral)/np.pi
@@ -1903,28 +1909,28 @@ class HestonModel:
         err = (self.estimate_value_surface(params) - self.value_surface.values)**2
         return np.sum(err)
 
-    def fit(self,tol=1e-2,cons=False,loss='mape'):
+    def fit(self,tol=1e-2,constraints=False,loss='ssr'):
         # v0, rho, kappa, theta, sigma, lambda = args
         loss = loss.lower() if loss.lower() in ['mape','ssr'] else 'ssr'
         params = ['v0', 'rho', 'kappa', 'theta', 'sigma', 'lambda']
         bounds = (
-            (0.0,0.5),
-            (-0.9,-0.002),
-            (0.0,5),
-            (0.0,0.3),
-            (0.0,1.5),
-            (0.0,1.0),
+            (0.01,0.5),
+            (-0.99,-0.01),
+            (0.25,5),
+            (0.01,0.3),
+            (0.025,2.5),
+            (-1.0,1.5),
         )
         cons = [
-            {'type': 'ineq', 'fun': lambda args:  np.abs(2*args[2]*args[3] - args[4]**2)-0.1},
+            {'type': 'ineq', 'fun': lambda args:  np.abs(2*args[2]*args[3] - args[4]**2)},
             ]
-        kw = dict(bounds=bounds, tol = tol, method='SLSQP',options={'maxiter':1000})
-        if cons:
+        kw = dict(bounds=bounds, tol = tol, method='SLSQP',options={'maxiter':1_000})
+        if constraints:
             kw['constraints'] = cons
         start = time.time()
         res = scipy.optimize.minimize(
             self.mape if loss == 'mape' else self.ssr,
-            [0.1,-0.5,1.5,0.1,0.3,0.5],
+            [self.v0_est,-0.5,1.5,self.theta_est,0.3,0.75],
             **kw
             )
         dt = time.time() - start
@@ -1963,7 +1969,7 @@ class HestonOption(Option):
         self.s = self.model.s
         self.k = k or self.s
         self.qty = qty
-        self.q = self.model.quote.dy
+        self.q = self.model.q
         if isinstance(t,(str,datetime.date,datetime.datetime)):
             self.t = self.date_to_t(t)
         else:
@@ -1979,13 +1985,15 @@ class HestonOption(Option):
         return f'{sign}{self.qty} HestonOption(ticker={self.ticker}, type={self.type})'
 
     def value(self,k,t):
+        if isinstance(t,(str,datetime.date,datetime.datetime,pd.Timestamp)):
+            t = self.date_to_t(t)
         return self.model.value(k=k,t=t)
 
-    def fit(self,tol=1e-1,cons=False, loss='mape'):
-        self.model.fit(tol,cons,loss)
+    def fit(self,tol=1e-1,constraints=False, loss='mape'):
+        self.model.fit(tol,constraints,loss)
         self.engine = VanillaOption(s=self.s,k=self.k,t=self.t,sigma=0.3,type=self.type,method=self.method,q=self.q,qty=self.qty)
         self.iv = self.engine.implied_volatility(self.value(self.k,self.t))
-        self.engine.sigma = self.iv
+        self.engine.update(sigma=self.iv)
         attrs = ['delta','gamma','theta','vega','rho','mu','plot','summary']
         for attr in attrs:
             setattr(self,attr,getattr(self.engine,attr))
@@ -1996,8 +2004,59 @@ class HestonOption(Option):
             engine = self.engine.update(inplace=False,k=k,t=t)
             return engine.implied_volatility(price)
 
-class MarketOption(Option):
+class LocalVolatilityModel:
 
+    def __init__(self,ticker,option_type='C'):
+        self.ticker = ticker
+        self.option_type = option_type
+        self.today = datetime.date.today()
+        self.now = datetime.datetime.now()
+        self.get_market_data()
+
+    def get_market_data(self):
+        self.option_chain = market.get_options(self.ticker)
+        quote = market.get_quote(self.ticker)
+        self.price = quote['regularMarketPrice']
+        self.dividend_yield = quote['trailingAnnualDividendYield']
+        self.fit()
+
+    def fit(self):
+        df = self.option_chain.copy()
+        df = df[df.contractType==self.option_type]
+        df['time_since_trade'] = utils.date_to_t(self.today, t0=df.lastTradeDate.dt.date) * 252
+        df = df[df.time_since_trade <= 1]
+        df['t'] = utils.date_to_t(df.expiration)
+        df['mid'] = (df.bid + df.ask)/2
+        self.df = df
+
+        xs = df.strike.values
+        ys = df.t.values
+        zs = df.mid.values
+        self.price_surface = lambda k, t,: scipy.interpolate.griddata((xs, ys), zs, (k,t), method='linear')
+
+    def dupire_local_volatility(self, k, t):
+        dk = self.price *0.01
+        dt = 0.01/252
+        dC_dt = np.diff(self.price_surface(k, np.array([t+dt, t-dt]))) / (2*dt)
+        dCs = self.price_surface(np.array([k-dk, k+dk, k]), t)
+        d2C_dk2 = (dCs[0] - (2*dCs[2]) + dCs[1]) / (dk**2)
+
+        local_variance = dC_dt / (0.5*(k**2) * d2C_dk2)
+        return np.sqrt(local_variance)
+    
+class MarketOption(Option):
+    '''A class for valuing and analyizing options using market data
+    
+    Parameters
+    ----------
+    `underlying`: the ticker of the underlying asset, alternatively an option symbol of the form {TICKER}{YYYY}{MM}{DD}{K}{TYPE}, e.g. `AAPL20230519P160`
+    `strike`: the strike price of the option
+    `expiry`: the expiry date of the option
+    `type`: the type of the option, either call or put
+    `method`: the method used to value the option, either `bs`, `binomial`, or `mc`
+    `style`: the style of the option, either `A` for American or `E` for European
+    `**kwargs`: additional keyword arguments to pass to the pricing engine'''
+    
     def __init__(self, underlying, strike=None, expiry=None, type='C', method='binomial', style='A', **kwargs):
         super().__init__()
         if any(i.isnumeric() for i in underlying) and strike is None and expiry is None:
@@ -2005,24 +2064,37 @@ class MarketOption(Option):
         else:
             self.underlying = ''.join(i.upper() for i in underlying if i.isalpha())
             self.strike = strike
-            self.expiry = expiry
-            self.t = utils.date_to_t(self.expiry).item()
+            self.expiry = utils.t_to_date(1/12) if expiry is None else expiry
+            self.t = utils.date_to_t(self.expiry, precision='m').item()
             self.type = type
-        self.style = style
+
         self.method = method
-        self.today = datetime.date.today()
-        self.now = datetime.datetime.now()
-        self.get_market_attributes()
+        self.style = style
+        self.init_engine(**kwargs)
+    
+    def init_engine(self, **kwargs):
+        self.style = kwargs.get('style', 'A')
+        self.method = kwargs.get('method', 'binomial')
+        self.model = LocalVolatilityModel(self.underlying, self.type)
+        self.t = self.t or 1/12
+        self.price = self.model.price
+        self.strike = self.strike or self.price
         self.engine = VanillaOption(
-            s=self.price,
+            s=self.model.price,
             k=self.strike,
             t=self.t,
-            sigma=self.vol_surface(self.strike, self.t).item(),
+            q=self.model.dividend_yield,
             type=self.type,
             style=self.style,
             method=self.method,
             **kwargs
         )
+        
+        self.sigma = self.engine.implied_volatility(
+            self.model.price_surface(self.strike, self.t).item(),
+        )
+        
+        self.engine.update(sigma=self.sigma, inplace=True)
 
         for attr in ('value', 'delta', 'gamma', 'vega', 'theta', 'rho','vanna', 'plot', 'summary'):
             setattr(self, attr, getattr(self.engine, attr))
@@ -2031,36 +2103,18 @@ class MarketOption(Option):
         return f'MarketOption(\'{self.underlying}\', k={self.strike}, t={round(self.t,3)}, type=\'{self.type}\')'
 
     def parse_symbol(self, symbol):
-        'Must be of the form TICKERYYYYMMDDXXXC where XXX is the strike price'
+        'Must be of the form {TICKER}{YYYY}{MM}{DD}{K}{TYPE}'
         end_ticker = next(i for i, c in enumerate(symbol) if c.isdigit())
 
         self.underlying = symbol[:end_ticker].upper()
         self.expiry = datetime.datetime.strptime(symbol[end_ticker:end_ticker+8], '%Y%m%d').date()
-        self.t = utils.date_to_t(self.expiry).item()
+        self.t = utils.date_to_t(self.expiry, precision='m').item()
         self.strike = float(symbol[end_ticker+8:-1])
         self.type = symbol[-1].upper()
-
-
-    def get_market_attributes(self):
-        self.option_chain = market.get_options(self.underlying)
-        self.ws_obj = ws.Stock(self.underlying)
-        self.price = self.ws_obj.price
-        self.dividend_yield = self.ws_obj.dy
-        self.fit_vol_surface()
-
-    def fit_vol_surface(self):
-        last_date = utils.get_last_trading_day(self.today - datetime.timedelta(1))
-        recent_dates = np.array([self.today, last_date])
-
-        df = self.option_chain.copy()
-        df = df[df.contractType=='C']
-        df = df[np.isin(df.lastTradeDate.dt.date, recent_dates)]
-        df['t'] = utils.date_to_t(df.expiration)
-
-        xs = df.strike.values
-        ys = df.t.values
-        zs = df.impliedVolatility.values
-        self.vol_surface = lambda k, t,: scipy.interpolate.griddata((xs, ys), zs, (k,t), method='linear')
+        
+    def refresh(self):
+        self.model.get_market_data()
+        self.init_engine()
 
 class VarianceSwap(OptionPortfolio):
 

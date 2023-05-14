@@ -1,10 +1,7 @@
 import datetime
-import os
 import requests
 import concurrent.futures as cf
-import pickle
 import json
-import httplib2
 import http
 import functools
 
@@ -14,71 +11,58 @@ import scipy
 import matplotlib.pyplot as plt
 import plotly.graph_objects as go
 
-import wallstreet as ws
-import yfinance as yf
-import pandas.tseries.holiday
-
 from . import utils
 
-def get_yield_curve(from_treasury=False):
-    ff_url = 'https://www.federalreserve.gov/datadownload/Output.aspx?rel=PRATES&series=c27939ee810cb2e929a920a6bd77d9f6&lastobs=5&from=&to=&filetype=csv&label=include&layout=seriescolumn&type=package'
-    r = requests.get(ff_url)
-    ff = pd.read_csv(pd.io.common.BytesIO(r.content),header=5)
-    fed_funds = ff.iloc[-1,-1] / 100
+@functools.lru_cache(maxsize=None)
+def get_yield_curve(date=None):
+    if date is None:
+        end_date = datetime.date.today()
+    else:
+        end_date = pd.to_datetime(date).date()
+    start_date = end_date - datetime.timedelta(days=4)
+    start_date_str = start_date.strftime('%m/%d/%Y')
+    end_date_str = end_date.strftime('%m/%d/%Y')
 
-    if from_treasury:
-        pardir = os.path.dirname(os.path.dirname(__file__))
-        if os.path.exists(f'{pardir}/data/today_yield_curve.pkl'):
-            obj = pickle.load(open(f'{pardir}/data/today_yield_curve.pkl','rb'))
-            if obj.date.iloc[0] == utils.get_last_trading_day():
-                return obj
-        date = datetime.date.today()
-        strf = date.strftime('%Y%m')
-        url = f'https://home.treasury.gov/resource-center/data-chart-center/interest-rates/TextView?type=daily_treasury_yield_curve&field_tdr_date_value_month={strf}'
-        df = pd.read_html(url)[0]
-        as_of_date = df.Date.iloc[-1]
-        as_of_date = datetime.datetime.strptime(as_of_date,'%m/%d/%Y').date()
-
-        cols = ['1 Mo', '2 Mo', '3 Mo', '4 Mo', '6 Mo', '1 Yr', '2 Yr', '3 Yr', '5 Yr','7 Yr', '10 Yr', '20 Yr', '30 Yr']
-        vals = df[cols].iloc[-1]
-        mats = np.array([float(i.split(' ')[0])/12 if 'Mo' in i else float(i.split(' ')[0]) for i in vals.index])
-        yields = vals.values / 100
-
-        result = pd.DataFrame({'mat':mats,'rate':yields,'date':as_of_date})
-        ff_df = pd.DataFrame({'mat':[1/365],'rate':[fed_funds],'date':[as_of_date]})
-        result = pd.concat((ff_df,result)).reset_index(drop=True)
-        
-        pickle.dump(result,open(f'{pardir}/data/today_yield_curve.pkl','wb'))
-
-        return result
-
-    url = 'https://www.federalreserve.gov/datadownload/Output.aspx?rel=H15&series=bf17364827e38702b42a58cf8eaa3f78&lastobs=5&from=&to=&filetype=csv&label=include&layout=seriescolumn'
-    r = requests.get(url)
-    df = pd.read_csv(pd.io.common.StringIO(r.text))
-    df.columns = ['description',1/12,0.25,0.5,1.,2.,3.,5.,7.,10.,20.,30.]
-    df = df[df!='ND'].dropna()
-
-    yc_df = pd.DataFrame({'mat':df.columns[1:].values.astype(float),'rate':df.iloc[-1,1:].values.astype(float) / 100,'date':df.iloc[-1,0]})
-    ff_df = pd.DataFrame({'mat':[0],'rate':[fed_funds],'date':[yc_df.date.iloc[0]]})
+    fed_url = 'https://www.federalreserve.gov/datadownload/Output.aspx'
+    yc_ext = f'?rel=H15&series=350823c81f512b2596ef134f67cc01dc&lastobs=&from={start_date_str}&to={end_date_str}&filetype=csv&label=omit&layout=seriescolumn'
+    yc_endpoint = fed_url + yc_ext
     
-    result = pd.concat((ff_df,yc_df)).reset_index(drop=True)
+    r = requests.get(yc_endpoint)
+    df = pd.read_csv(pd.io.common.BytesIO(r.content), header=1)
+    df = df.replace('ND', np.nan).ffill()
 
-    return result
+    df.columns = ['date',1/12,0.25,0.5,1.,2.,3.,5.,7.,10.,20.,30.,1/365]
+    df = df[['date',1/365,1/12,0.25,0.5,1.,2.,3.,5.,7.,10.,20.,30.]]
+    df['date'] = pd.to_datetime(df.date).dt.date
+    df = pd.DataFrame({'mat':df.columns[1:].values.astype(float),'rate':df.iloc[-1,1:].values.astype(float) / 100})
+    
+    return df
 
-def get_risk_free_rate(t,from_treasury=False):
+@functools.lru_cache(maxsize=None)
+def get_risk_free_rate(t,date=None):
     arr = False
     if hasattr(t,'__iter__'):
         t = np.array(t)
         arr = True
-    curve = get_yield_curve(from_treasury=from_treasury)
+    curve = get_yield_curve(date)
     f = scipy.interpolate.interp1d(curve.mat.values,curve.rate.values,kind='cubic')
     return f(t) if arr else f(t).item()
 
-@functools.cache
-def get_price(ticker, date):
+def get_quote(ticker):
+    url = '/v6/finance/quote'
+    conn = http.client.HTTPSConnection('query2.finance.yahoo.com')
+    conn.request('GET', f'{url}?symbols={ticker}')
+    response = conn.getresponse()
+    dat = json.load(response)
+
+    return dat['quoteResponse']['result'][0]
+
+@functools.lru_cache(maxsize=None)
+def get_price(ticker, date=None):
+    if date is None:
+        return get_quote('SPY')['regularMarketPrice']
     date = pd.to_datetime(date).date()
     epoch = datetime.datetime.utcfromtimestamp(0)
-
 
     unix1 = int((utils.get_last_trading_day(date) - epoch.date()).total_seconds())
     unix2 = int((utils.get_last_trading_day(date + datetime.timedelta(4)) - epoch.date()).total_seconds())
@@ -93,11 +77,13 @@ def get_price(ticker, date):
 
     return price
 
-def get_bars(ticker, start_date=None, end_date=None, interval='5m'):
+def get_price_history(ticker, start_date=None, end_date=None, interval='5m',extended_hours=False):
     limit_dict = {
         '5m':30,
         '1m':7
     }
+    ext_bool_str = str(extended_hours).lower()
+
     if end_date is None:
         end_date = utils.get_last_trading_day()
 
@@ -128,7 +114,7 @@ def get_bars(ticker, start_date=None, end_date=None, interval='5m'):
 
     url = f'/v7/finance/chart/{ticker}'
     conn = http.client.HTTPSConnection('query2.finance.yahoo.com')
-    conn.request('GET', f'{url}?interval={interval}&period1={unix1}&period2={unix2}')
+    conn.request('GET', f'{url}?interval={interval}&period1={unix1}&period2={unix2}&includePrePost={ext_bool_str}')
     response = conn.getresponse()
     r = json.load(response)
 
@@ -143,22 +129,22 @@ def get_bars(ticker, start_date=None, end_date=None, interval='5m'):
     return df
 
 def get_options(ticker,exp=None):
+    url = f'/v7/finance/options/{ticker}'
+    conn = http.client.HTTPSConnection('query2.finance.yahoo.com')
     if exp is None:
-        url = f'/v7/finance/options/{ticker}'
-        conn = http.client.HTTPSConnection('query2.finance.yahoo.com')
         conn.request('GET', f'{url}?getAllData=true')
         response = conn.getresponse()
-
         data = json.load(response)['optionChain']['result'][0]['options']
+        
         calls = pd.concat(pd.DataFrame(i['calls']) for i in data)
         puts = pd.concat(pd.DataFrame(i['puts']) for i in data)
         df = pd.concat([calls, puts])
     
     else:
-        Http = httplib2.Http()
-        url = f'https://query2.finance.yahoo.com/v7/finance/options/{ticker}'
-
-        data = json.loads(Http.request(url)[1])
+        conn.request('GET', f'{url}')
+        response = conn.getresponse()
+        data = json.load(response)
+        
         exps = data['optionChain']['result'][0]['expirationDates']
         compatible_dts = list(pd.to_datetime(exps,unit='s').date)
 
@@ -179,10 +165,12 @@ def get_options(ticker,exp=None):
         df = pd.DataFrame()
 
         def request_api(expiration):
-            nonlocal ticker
-            temp_http = httplib2.Http()
-            date_url = f'http://query2.finance.yahoo.com/v7/finance/options/{ticker}?date={expiration}'
-            data = json.loads(temp_http.request(date_url)[1])
+            url = f'/v7/finance/options/{ticker}'
+            conn = http.client.HTTPSConnection('query2.finance.yahoo.com')
+            conn.request('GET', f'{url}?date={expiration}')
+            response = conn.getresponse()
+            data = json.load(response)
+
             calls = pd.DataFrame(data['optionChain']['result'][0]['options'][0]['calls'])
             puts = pd.DataFrame(data['optionChain']['result'][0]['options'][0]['puts'])
             return pd.concat([calls,puts])
@@ -219,11 +207,8 @@ def dealer_gamma(data, ticker, date, quantile=0.7, r=None):
     >>> dealer_gammas = df.groupby('date').apply(lambda x: dealer_gamma(x, ticker, x.date.iloc[0]))
     '''
     if 'Close' not in data.columns:
-        stock = ws.Stock(ticker)
         date = pd.to_datetime(date).date()
-        days = (datetime.date.today() - date).days
-        df = stock.historical(days+1)
-        underlying_price = df[df.Date.dt.date == date].Close.iloc[0]
+        underlying_price = get_price(ticker, date)
     else:
         underlying_price = data[data.date == date].Close.iloc[0]
     chain = data
@@ -293,26 +278,26 @@ def gamma_walls(df, ticker, date=None):
 
 def option_walls(ticker,exp=3,xrange=0.1,n=5):
     options = get_options(ticker,exp)
-    stock = ws.Stock(ticker)
-    options = options[(options.strike > stock.price*(1-xrange))&(options.strike< stock.price*(1+xrange))]
+    price = get_price(ticker)
+    options = options[(options.strike > price*(1-xrange))&(options.strike< price*(1+xrange))]
     tbl = options.groupby(['contractType','strike']).openInterest.sum()
     return tbl.sort_values(ascending=False).groupby('contractType').head(n).sort_index(ascending=False)
 
 def plot_option_interest(ticker,exp=None,net=False,xrange=0.2):
     options = get_options(ticker,exp)
-    stock = ws.Stock(ticker)
-    options = options[(options.strike > stock.price*(1-xrange))&(options.strike< stock.price*(1+xrange))]
+    price = get_price(ticker)
+    options = options[(options.strike > price*(1-xrange))&(options.strike< price*(1+xrange))]
     tbl = options.groupby(['contractType','strike']).openInterest.sum()
 
     if net:
         diff_tbl = tbl.C - tbl.P
         plt.bar(diff_tbl.index,diff_tbl.values,color = np.where(diff_tbl.values>0,'green','red'))
-        plt.axvline(stock.price, color='black', linestyle='--')
+        plt.axvline(price, color='black', linestyle='--')
         word = 'Net'
     else:
         plt.bar(tbl.C.index,tbl.C.values,color='green')
         plt.bar(tbl.P.index,-tbl.P.values,color='red')
-        plt.axvline(stock.price, color='black', linestyle='--')
+        plt.axvline(price, color='black', linestyle='--')
         word = ''
     plt.axhline(0, color='black')
     plt.grid()
@@ -324,12 +309,10 @@ class VolSurface:
     `moneyness`: boolean to determine whether to use abolute strikes or % moneyness
     `source`: the source of the data, either \'CBOE\' or \'wallstreet\''''
 
-    def __init__(self, ticker, moneyness=False, source='wallstreet'):
+    def __init__(self, ticker, moneyness=False):
         self.ticker = ticker
         self.moneyness = moneyness
-        self.source = source
-        self.underlying = ws.Stock(self.ticker)
-        self.spot = self.underlying.price
+        self.spot = get_price(ticker)
 
     def get_data(self):
         data = get_options(self.ticker,20)
@@ -386,11 +369,7 @@ class GEX:
     def __init__(self,ticker: str = 'SPY'):
         self.ticker = ticker
         self.today = datetime.datetime.today()
-        self.ws_objs = {
-            self.ticker:ws.Stock(self.ticker),
-            'SPY':ws.Stock('SPY'),
-            '^SPX':ws.Stock('^SPX')
-        }
+        self.spot = get_price(ticker)
 
     def bs_gamma(self, s, k, t, sigma, r):
         d1 = (np.log(s/(k*((1+r)**-t))) + ((0.5*sigma**2))*t)/(sigma*(t**0.5))
@@ -398,7 +377,7 @@ class GEX:
 
     def dealer_gamma(self, date=None, quantile=0.7, gamma_shifts=False):
         aggs = {}
-        underlying_price = self.ws_objs[self.ticker].price
+        underlying_price = self.spot
         chain = get_options(self.ticker,date)
         rel = chain[(chain.strike > underlying_price*0.66) & (chain.strike < underlying_price*1.33)].copy()
         # rel = rel[rel.openInterest > np.quantile(rel.openInterest,quantile)]
@@ -444,7 +423,7 @@ class GEX:
             date = pd.to_datetime(date)
             str_date = date.strftime('%m-%d-%Y')
 
-        underlying_price = self.ws_objs[self.ticker].price
+        underlying_price = self.spot
         spot = np.linspace(underlying_price*0.66,underlying_price*1.33,50)
         spot = np.sort(np.append(spot,underlying_price))
         
