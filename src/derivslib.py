@@ -120,7 +120,7 @@ class BinomialOption(Option):
     '''
     params = ['s','k','t','sigma','r','q','type','style','n','qty','tree']
 
-    def __init__(self, s=100, k=100, t=1, sigma=0.3, r=None, type: str='C', style: str='A', n: int=500, q=0., qty: int=1, **kwargs):
+    def __init__(self, s=100, k=100, t=1.0, sigma=0.3, r=None, type: str='C', style: str='A', n: int=500, q=0., qty: int=1, **kwargs):
         super().__init__()
         self.s = s
         self.k = k
@@ -448,7 +448,7 @@ class BinomialBarrierOption(BinomialOption):
         'knockout':'KO'
     }
 
-    def __init__(self, s=100, k=100, t=1, sigma=0.3, r=None, q=0., barrier=120, barrier_type='KI', type: str='C', style: str='A', n: int=50, qty: int = 1, **kwargs):
+    def __init__(self, s=100, k=100, t=1.0, sigma=0.3, r=None, q=0., barrier=120, barrier_type='KI', type: str='C', style: str='A', n: int=50, qty: int = 1, **kwargs):
         self.barrier = barrier
         if barrier_type.lower() not in self.valid_barriers.keys():
             raise ValueError('`barrier_type` must be KI, knockin, KO, or knockout')
@@ -506,7 +506,7 @@ class BSOption(Option):
     '''
     params = ['s','k','t','sigma','r','q','type']
 
-    def __init__(self,s=100, k=100, t=1, sigma=0.3, r=None, type='C', qty=1, q=0., **kwargs):
+    def __init__(self,s=100, k=100, t=1.0, sigma=0.3, r=None, type='C', qty=1, q=0., **kwargs):
         super().__init__()
         self.s = s
         self.k = k
@@ -2033,6 +2033,11 @@ class LocalVolatilityModel:
         ys = df.t.values
         zs = df.mid.values
         self.price_surface = lambda k, t,: scipy.interpolate.griddata((xs, ys), zs, (k,t), method='linear')
+
+    def implied_volatility(self, k, t):
+        price = self.price_surface(k,t)
+        engine = VanillaOption(s=self.price,k=k,t=t,type=self.option_type,method='bs',q=self.dividend_yield)
+        return engine.implied_volatility(price)
 
     def dupire_local_volatility(self, k, t):
         dk = self.price *0.01

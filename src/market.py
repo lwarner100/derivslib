@@ -38,7 +38,6 @@ def get_yield_curve(date=None):
     
     return df
 
-@functools.lru_cache(maxsize=None)
 def get_risk_free_rate(t,date=None):
     arr = False
     if hasattr(t,'__iter__'):
@@ -124,7 +123,11 @@ def get_price_history(ticker, start_date=None, end_date=None, interval='5m',exte
     
     df = pd.DataFrame(data)
     df['date'] = pd.to_datetime(df.date, unit='s') - datetime.timedelta(hours=4)
-    df = df[df['date'].dt.date.isin(utils.get_trading_days(start_date, end_date).date)]
+    if interval == '1d':
+        df['date'] = df['date'].dt.date
+        df = df[df['date'].isin(utils.get_trading_days(start_date, end_date).date)]
+    else:
+        df = df[df['date'].dt.date.isin(utils.get_trading_days(start_date, end_date).date)]
    
     return df
 
