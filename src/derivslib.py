@@ -820,10 +820,52 @@ class BSOption(Option):
                 plt.axhline(0,color='black')
                 plt.axvline(k,linestyle='--',color='gray',alpha=0.7)
 
-            interactive_plot = widgets.interactive(f, t=(0.001,2.0,0.001),sigma=(0.01,1.0,0.01), r = (0.0,0.08,0.0025), k = (self.k*0.8,self.k*1.2,0.1), q = (0,0.1,0.005))
-            output = interactive_plot.children[-1]
-            output.layout.height = '450px'
-            return interactive_plot
+            range_dict = dict(
+                t=(0.001,2.0,0.001),
+                sigma=(0.01,1.0,0.01),
+                r = (0.0,0.08,0.0025),
+                k = (self.k*0.8,self.k*1.2,0.1),
+                q = (0,0.1,0.005)
+            )
+
+            temp_values = dict(
+                t=self.t,
+                sigma=self.sigma,
+                r=self.r,
+                k=self.k,
+                q=self.q
+            )
+
+            output = widgets.VBox([])
+
+            sliders = {
+                var:widgets.FloatSlider(
+                    value=temp_values[var],
+                    min=range_dict[var][0],
+                    max=range_dict[var][1],
+                    step=range_dict[var][2],
+                    description='value: '
+                    )
+                for var in range_dict.keys()
+            }
+
+            def update_slider_range(change):
+                var = change.new
+                output.children = (output.children[0], sliders[var], output.children[-1])
+
+            dropdown = widgets.Dropdown(
+                options=range_dict.keys(),
+                description='Parameter: ',
+                value='t'
+            )
+
+            dropdown.observe(update_slider_range, names='value')
+            output.children = (dropdown,)
+            interactive_plot = widgets.interactive(f, **sliders)
+            output.children = (*output.children, interactive_plot.children[-1])
+            output.layout.height = '525px'
+
+            return output
 
 class MCOption(Option):
     '''Implementation of a Monte-Carlo option pricing model

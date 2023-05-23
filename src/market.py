@@ -128,6 +128,8 @@ def get_price_history(ticker, start_date=None, end_date=None, interval='5m',exte
         df = df[df['date'].isin(utils.get_trading_days(start_date, end_date).date)]
     else:
         df = df[df['date'].dt.date.isin(utils.get_trading_days(start_date, end_date).date)]
+    df['date'] = df.date.astype('datetime64[ns]')
+    df.columns = df.columns.str.capitalize()
    
     return df
 
