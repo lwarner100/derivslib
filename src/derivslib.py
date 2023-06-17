@@ -320,7 +320,7 @@ class BinomialOption(Option):
         return self.qty*result
 
     def gamma(self, **kwargs):
-        precision = 6e-1
+        precision = 5e-4
         s = self.s
         if not kwargs.get('s') is None:
             s = kwargs['s']
@@ -338,12 +338,12 @@ class BinomialOption(Option):
         return abs(self.qty)*result[0]
 
     def vega(self, **kwargs):
-        result = self.deriv(lambda x: self.value(sigma=x, **kwargs), self.sigma, dx=2.5e-2)
+        result = self.deriv(lambda x: self.value(sigma=x, **kwargs), self.sigma, dx=1e-4)
 
         return abs(self.qty)*result / 100
 
     def theta(self, **kwargs):
-        result = -self.deriv(lambda x: self.value(t=x, **kwargs), self.t, dx=1e-2)
+        result = -self.deriv(lambda x: self.value(t=x, **kwargs), self.t, dx=1e-4)
 
         return abs(self.qty)*result / 365
 
@@ -364,14 +364,16 @@ class BinomialOption(Option):
 
     def plot(self,var='value',resolution=25, **kwargs):
         '''`var` must be either \'value\', \'delta\', \'gamma\', \'vega\', \'theta\', \'rho\', \'payoff\', \'summary\', or  \'pnl\''''
-        greeks = {'value','delta','gamma','vega','rho','theta','pnl','payoff','summary'}
+        greeks = {'value','delta','gamma','vega','rho','theta','mu', 'vanna','pnl','payoff','summary'}
+        doc_str = '`var` must be either '+''. join(f'\'{i}\', ' if idx != (len(greeks)-1) else f'or \'{i}\'' for idx, i in enumerate(greeks))
+
         self.__dict__.update(kwargs)
 
         if kwargs:
             self.get_secondary_params()
 
         if var not in greeks: 
-            raise ValueError('`var` must be either value, delta, gamma, vega, theta, rho, payoff, pnl, or summary')
+            raise ValueError(doc_str)
 
         spot = np.linspace(self.k*0.66,self.k*1.33,resolution)
 
@@ -1104,7 +1106,7 @@ class MCOption(Option):
     def gamma(self, **kwargs):
         kw = kwargs.copy()
         s = kw.pop('s',self.s)
-        precision = kwargs.get('precision',6e-1)
+        precision = kwargs.get('precision', 6e-1)
 
         up, down = s-precision, s+precision
         if isinstance(up,float):
@@ -2269,4 +2271,4 @@ class VarianceSwap(OptionPortfolio):
             return interactive_plot
 
 if __name__=='__main__':
-    pass
+    print(BSOption())

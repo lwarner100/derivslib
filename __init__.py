@@ -7,3 +7,8 @@ try:
     from .src import cboe
 except ImportError:
     pass
+
+try:
+    market.get_risk_free_rate()
+except:
+    pass

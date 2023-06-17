@@ -14,12 +14,19 @@ import plotly.graph_objects as go
 from . import utils
 
 @functools.lru_cache(maxsize=None)
-def get_yield_curve(date=None):
-    if date is None:
+def get_yield_curve(start_date=None, end_date=None):
+    is_time_series = start_date is not None and end_date is not None
+    most_recent = start_date is None
+    if end_date is None:
         end_date = datetime.date.today()
     else:
-        end_date = pd.to_datetime(date).date()
-    start_date = end_date - datetime.timedelta(days=4)
+        end_date = pd.to_datetime(end_date).date()
+
+    if start_date is None:
+        start_date = end_date - datetime.timedelta(days=4)
+    else:
+        start_date = pd.to_datetime(start_date).date()
+
     start_date_str = start_date.strftime('%m/%d/%Y')
     end_date_str = end_date.strftime('%m/%d/%Y')
 
@@ -34,27 +41,52 @@ def get_yield_curve(date=None):
     df.columns = ['date',1/12,0.25,0.5,1.,2.,3.,5.,7.,10.,20.,30.,1/365]
     df = df[['date',1/365,1/12,0.25,0.5,1.,2.,3.,5.,7.,10.,20.,30.]]
     df['date'] = pd.to_datetime(df.date).dt.date
-    df = pd.DataFrame({'mat':df.columns[1:].values.astype(float),'rate':df.iloc[-1,1:].values.astype(float) / 100})
-    
-    return df
+    df[df.columns[1:]] = df[df.columns[1:]].astype(float) / 100
+    df = df.ffill().bfill()
+    # try:
+    #     df = df.ffill()
+    # except:
+    #     df = df.bfill()
+    if is_time_series:
+        return df
+    elif most_recent:
+        return df.tail(1)
+    return df.head(1)
 
-def get_risk_free_rate(t,date=None):
+def get_risk_free_rate(t, date=None):
     arr = False
     if hasattr(t,'__iter__'):
         t = np.array(t)
         arr = True
+    
+    if hasattr(date,'__iter__') and not isinstance(date, str):
+        yc = get_yield_curve(np.min(date), np.max(date))
+        yc['t'] = utils.date_to_t(datetime.date.today(), t0=yc['date'].values)
+
+        xs = yc.columns[1:-1].astype(float).values
+        ys = yc.t.values
+
+        xs, ys = np.meshgrid(xs, ys)
+        zs = yc.iloc[:,1:-1].values
+
+        xs = np.concatenate(xs)
+        ys = np.concatenate(ys)
+        zs = np.concatenate(zs)
+
+        yc_interp = lambda m, d,: scipy.interpolate.griddata((xs, ys), zs, (m, d), method='cubic')
+        return yc_interp(t, utils.date_to_t(datetime.date.today(), t0=date))
+    
     curve = get_yield_curve(date)
-    f = scipy.interpolate.interp1d(curve.mat.values,curve.rate.values,kind='cubic')
+    f = scipy.interpolate.interp1d(curve.iloc[-1,1:].index.astype(float),curve.iloc[-1,1:].values.astype(float),kind='cubic')
     return f(t) if arr else f(t).item()
 
 def get_quote(ticker):
-    url = '/v6/finance/quote'
+    url = f'/v7/finance/options/{ticker}'
     conn = http.client.HTTPSConnection('query2.finance.yahoo.com')
     conn.request('GET', f'{url}?symbols={ticker}')
     response = conn.getresponse()
     dat = json.load(response)
-
-    return dat['quoteResponse']['result'][0]
+    return dat['optionChain']['result'][0]['quote']
 
 @functools.lru_cache(maxsize=None)
 def get_price(ticker, date=None):
@@ -113,7 +145,7 @@ def get_price_history(ticker, start_date=None, end_date=None, interval='5m',exte
 
     url = f'/v7/finance/chart/{ticker}'
     conn = http.client.HTTPSConnection('query2.finance.yahoo.com')
-    conn.request('GET', f'{url}?interval={interval}&period1={unix1}&period2={unix2}&includePrePost={ext_bool_str}')
+    conn.request('GET', f'{url}?interval={interval}&period1={unix1}&period2={unix2}&includePrePost={ext_bool_str}&close=adjusted')
     response = conn.getresponse()
     r = json.load(response)
 

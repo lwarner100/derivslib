@@ -55,6 +55,8 @@ def date_to_t(date, t0=None, precision='day'):
 
     today = pd.Timestamp.today() if t0 is None else pd.to_datetime(t0).date()
     us_holidays = pd.tseries.holiday.USFederalHolidayCalendar()
+    # if date > today:
+    #     return -date_to_t(today, t0=date, precision=precision)
     holidays = us_holidays.holidays(start=today, end=date)
     dt = len(pd.bdate_range(start=today, end=date)) - len(holidays)
     return dt/252
